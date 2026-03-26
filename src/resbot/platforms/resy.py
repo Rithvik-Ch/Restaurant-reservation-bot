@@ -231,24 +231,30 @@ class ResyClient(ReservationPlatform):
         await self._session.aclose()
 
     async def snipe(self, target: ReservationTarget, day: date) -> BookingResult:
-        """Speed-optimized snipe: burst requests around drop time.
+        """Speed-optimized snipe: burst requests with configurable rate and timeout.
 
-        Fires find requests in rapid succession starting 1s before
-        the drop time through 10s after, at ~100ms intervals.
+        Uses target.snipe_rate (requests/sec) and target.snipe_timeout (seconds)
+        to control the burst. Stops immediately on success or when timeout expires.
         """
+        import time as _time
+
         from resbot.engine import rank_slots
 
         best_result = BookingResult(
             target_id=target.id, success=False, error="No slots found"
         )
 
-        # Burst: try up to 50 times over ~5 seconds
-        for attempt in range(50):
+        sleep_interval = 1.0 / target.snipe_rate
+        deadline = _time.monotonic() + target.snipe_timeout
+        attempt = 0
+
+        while _time.monotonic() < deadline:
+            attempt += 1
             try:
                 slots = await self.find_slots(target.venue_id, day, target.party_size)
                 ranked = rank_slots(slots, target)
                 if not ranked:
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(sleep_interval)
                     continue
 
                 # Try top 3 slots in parallel
@@ -262,6 +268,7 @@ class ResyClient(ReservationPlatform):
                 for result in results:
                     if isinstance(result, BookingResult) and result.success:
                         result.target_id = target.id
+                        logger.info("Snipe succeeded on attempt %d", attempt)
                         return result
 
                 best_result = BookingResult(
@@ -269,16 +276,18 @@ class ResyClient(ReservationPlatform):
                     success=False,
                     error="Slots found but booking failed",
                 )
+                await asyncio.sleep(sleep_interval)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 412:
-                    # Slots not yet available, keep trying
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(sleep_interval)
                     continue
                 logger.warning("HTTP error during snipe attempt %d: %s", attempt, e)
+                await asyncio.sleep(sleep_interval)
             except Exception as e:
                 logger.warning("Error during snipe attempt %d: %s", attempt, e)
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(sleep_interval)
 
+        logger.info("Snipe timed out after %d attempts (%ds)", attempt, target.snipe_timeout)
         return best_result
 
     async def _try_book_slot(

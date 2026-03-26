@@ -248,6 +248,8 @@ def target_add(ctx, from_file):
     drop_str = click.prompt("Drop time (HH:MM:SS)", default="00:00:00")
     drop_tz = click.prompt("Drop timezone", default="America/New_York")
     max_retries = click.prompt("Max retry days", type=int, default=30)
+    snipe_rate = click.prompt("Snipe request rate (requests/sec, 1-50)", type=float, default=10.0)
+    snipe_timeout = click.prompt("Snipe timeout in seconds (how long to keep trying after drop)", type=int, default=300)
 
     t = ReservationTarget(
         id=target_id,
@@ -263,6 +265,8 @@ def target_add(ctx, from_file):
         drop_time=time.fromisoformat(drop_str),
         drop_timezone=drop_tz,
         max_retry_days=max_retries,
+        snipe_rate=snipe_rate,
+        snipe_timeout=snipe_timeout,
     )
     path = save_target(t, config_dir)
     click.echo(f"\nTarget '{t.id}' saved to {path}")

@@ -24,4 +24,8 @@ drop_time: "00:00:00"            # When reservations become available (usually m
 drop_timezone: "America/New_York"
 max_retry_days: 30               # Give up after this many failed attempts
 
+# Snipe behavior
+snipe_rate: 10.0                 # Requests per second during burst (1-50)
+snipe_timeout: 300               # Seconds to keep trying after drop time (default 5 min)
+
 enabled: true
