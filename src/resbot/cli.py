@@ -64,31 +64,84 @@ def profile_setup(ctx):
 
     click.echo("=== resbot Profile Setup ===\n")
 
-    name = click.prompt("Your name")
-    phone = click.prompt("Phone number (e.g. +15551234567)")
-    email = click.prompt("Email")
+    click.echo("--- Resy Login ---")
+    click.echo("Enter your Resy account email and password.")
+    click.echo("The bot will log in and grab your auth token automatically.\n")
 
-    click.echo("\n--- Resy Credentials ---")
-    click.echo("Get your API key and auth token from the Resy website.")
-    click.echo("Open browser dev tools → Network tab → look for requests to api.resy.com")
-    resy_api_key = click.prompt("Resy API key", default="", show_default=False)
-    resy_auth_token = click.prompt("Resy auth token", default="", show_default=False)
-    resy_payment_id = click.prompt(
-        "Resy payment method ID (leave blank to auto-detect)",
-        default="",
-        show_default=False,
+    resy_email = click.prompt("Resy email")
+    resy_password = click.prompt("Resy password", hide_input=True)
+
+    click.echo("\nLogging in to Resy...")
+
+    try:
+        from resbot.platforms.resy import ResyClient
+
+        creds = asyncio.run(ResyClient.login(resy_email, resy_password))
+    except Exception as e:
+        click.echo(f"\nLogin failed: {e}", err=True)
+        click.echo("You can still set up your profile and try again later with 'resbot login'.")
+        creds = {}
+
+    if creds:
+        click.echo(f"Logged in as {creds.get('first_name', '')} {creds.get('last_name', '')}")
+        click.echo(f"Payment method: {'found' if creds.get('payment_method_id') else 'none on file'}")
+
+    name = click.prompt(
+        "\nYour name",
+        default=f"{creds.get('first_name', '')} {creds.get('last_name', '')}".strip() or None,
     )
+    phone = click.prompt(
+        "Phone number",
+        default=creds.get("phone", "") or None,
+    )
+    email = click.prompt("Email", default=resy_email)
 
     p = UserProfile(
         name=name,
         phone=phone,
         email=email,
-        resy_api_key=resy_api_key,
-        resy_auth_token=resy_auth_token,
-        resy_payment_method_id=resy_payment_id or None,
+        resy_api_key=creds.get("api_key", ""),
+        resy_auth_token=creds.get("auth_token", ""),
+        resy_email=resy_email,
+        resy_password=resy_password,
+        resy_payment_method_id=creds.get("payment_method_id") or None,
     )
     path = save_profile(p, config_dir)
     click.echo(f"\nProfile saved to {path}")
+
+
+@profile.command("login")
+@click.pass_context
+def profile_login(ctx):
+    """Refresh Resy auth token by logging in again."""
+    config_dir = ctx.obj["config_dir"]
+    try:
+        p = load_profile(config_dir)
+    except FileNotFoundError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+
+    resy_email = p.resy_email or click.prompt("Resy email")
+    resy_password = p.resy_password or click.prompt("Resy password", hide_input=True)
+
+    click.echo("Logging in to Resy...")
+    try:
+        from resbot.platforms.resy import ResyClient
+
+        creds = asyncio.run(ResyClient.login(resy_email, resy_password))
+    except Exception as e:
+        click.echo(f"Login failed: {e}", err=True)
+        sys.exit(1)
+
+    p.resy_api_key = creds["api_key"]
+    p.resy_auth_token = creds["auth_token"]
+    p.resy_email = resy_email
+    p.resy_password = resy_password
+    if creds.get("payment_method_id"):
+        p.resy_payment_method_id = creds["payment_method_id"]
+
+    save_profile(p, config_dir)
+    click.echo("Auth token refreshed successfully.")
 
 
 @profile.command("show")

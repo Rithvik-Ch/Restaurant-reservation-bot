@@ -52,6 +52,8 @@ class UserProfile(BaseModel):
     email: str
     resy_api_key: str = ""
     resy_auth_token: str = ""
+    resy_email: str = ""
+    resy_password: str = ""
     resy_payment_method_id: str | None = None
     opentable_email: str = ""
     opentable_password: str = ""

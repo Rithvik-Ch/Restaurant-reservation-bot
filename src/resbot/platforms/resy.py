@@ -47,6 +47,47 @@ class ResyClient(ReservationPlatform):
             ),
         )
 
+    @staticmethod
+    async def login(email: str, password: str, api_key: str = "") -> dict:
+        """Log in to Resy with email/password and return credentials.
+
+        Returns dict with: auth_token, api_key, payment_method_id,
+        first_name, last_name, phone.
+        """
+        # Resy's public API key (used by the website itself)
+        if not api_key:
+            api_key = "VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5"
+        async with httpx.AsyncClient(
+            base_url=BASE_URL,
+            http2=True,
+            timeout=httpx.Timeout(10.0),
+            headers={
+                "Authorization": f'ResyAPI api_key="{api_key}"',
+                "Accept": "application/json",
+            },
+        ) as client:
+            resp = await client.post(
+                "/3/auth/password",
+                data={"email": email, "password": password},
+            )
+            resp.raise_for_status()
+            data = orjson.loads(resp.content)
+
+            auth_token = data.get("token", "")
+            payment_method_id = ""
+            payment_methods = data.get("payment_methods", [])
+            if payment_methods:
+                payment_method_id = str(payment_methods[0].get("id", ""))
+
+            return {
+                "auth_token": auth_token,
+                "api_key": api_key,
+                "payment_method_id": payment_method_id,
+                "first_name": data.get("first_name", ""),
+                "last_name": data.get("last_name", ""),
+                "phone": data.get("mobile_number", ""),
+            }
+
     async def authenticate(self, profile: UserProfile) -> None:
         """Validate auth token and fetch payment method ID if needed."""
         resp = await self._session.get("/2/user")
