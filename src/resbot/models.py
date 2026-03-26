@@ -72,6 +72,8 @@ class ReservationTarget(BaseModel):
     preferred_times: list[time] = Field(default_factory=list)
     preferred_seating: str | None = None
     target_date: date | None = None
+    start_date: date | None = None
+    end_date: date | None = None
     days_in_advance: int = Field(default=14, ge=1)
     drop_time: time = Field(default_factory=lambda: time(0, 0, 0))
     drop_timezone: str = "America/New_York"

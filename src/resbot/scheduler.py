@@ -53,13 +53,28 @@ class ReservationScheduler:
                 raise ValueError(f"Unsupported platform: {target.platform}")
         return self._clients[key]
 
-    def _compute_target_date(self, target: ReservationTarget) -> date:
-        """Compute the reservation date based on days_in_advance."""
+    def _compute_target_date(self, target: ReservationTarget) -> date | None:
+        """Compute the reservation date, respecting start_date/end_date bounds.
+
+        Returns None if today is outside the allowed date range.
+        """
         if target.target_date:
             return target.target_date
         tz = ZoneInfo(target.drop_timezone)
         now = datetime.now(tz)
-        return (now + timedelta(days=target.days_in_advance)).date()
+        candidate = (now + timedelta(days=target.days_in_advance)).date()
+
+        # Clamp to start_date/end_date if set
+        if target.start_date and candidate < target.start_date:
+            candidate = target.start_date
+        if target.end_date and candidate > target.end_date:
+            logger.info(
+                "Target %s: computed date %s is past end_date %s, skipping",
+                target.id, candidate, target.end_date,
+            )
+            return None
+
+        return candidate
 
     def add_target(self, target: ReservationTarget) -> None:
         """Schedule a target for automated sniping."""
@@ -144,6 +159,13 @@ class ReservationScheduler:
             return
 
         target_date = self._compute_target_date(target)
+        if target_date is None:
+            logger.info("Target %s: past end_date, marking complete", target.id)
+            status.completed = True
+            self.remove_target(target.id)
+            self._statuses[target.id] = status
+            return
+
         client = self._get_client(target)
 
         logger.info(

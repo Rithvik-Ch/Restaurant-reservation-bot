@@ -248,10 +248,18 @@ class ResyClient(ReservationPlatform):
         deadline = _time.monotonic() + target.snipe_timeout
         attempt = 0
 
+        logger.info(
+            "Starting snipe: venue=%s date=%s party=%d rate=%.1f/s timeout=%ds",
+            target.venue_id, day.isoformat(), target.party_size,
+            target.snipe_rate, target.snipe_timeout,
+        )
+
         while _time.monotonic() < deadline:
             attempt += 1
             try:
                 slots = await self.find_slots(target.venue_id, day, target.party_size)
+                if attempt <= 3 or attempt % 10 == 0:
+                    logger.info("Attempt %d: found %d raw slot(s)", attempt, len(slots))
                 ranked = rank_slots(slots, target)
                 if not ranked:
                     await asyncio.sleep(sleep_interval)

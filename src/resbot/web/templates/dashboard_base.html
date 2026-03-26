@@ -149,6 +149,10 @@
             <div class="form-row"><label>Preferred Times (comma-separated, e.g. 19:00,19:30)</label><input id="t-preferred" /></div>
             <div class="form-row"><label>Preferred Seating (optional)</label><input id="t-seating" placeholder="e.g. Dining Room" /></div>
             <div class="form-row-inline">
+                <div class="form-row"><label>Start Date (optional)</label><input id="t-start-date" type="date" /></div>
+                <div class="form-row"><label>End Date (optional)</label><input id="t-end-date" type="date" /></div>
+            </div>
+            <div class="form-row-inline">
                 <div class="form-row"><label>Days in Advance</label><input id="t-days" type="number" value="14" min="1" /></div>
                 <div class="form-row"><label>Max Retry Days</label><input id="t-retries" type="number" value="30" min="1" /></div>
             </div>
@@ -246,7 +250,9 @@ function loadTargets() {
             html += '<div class="target-item">' +
                 '<div class="target-info"><strong>' + t.venue_name + '</strong>' +
                 '<span>' + t.platform + ' | ' + t.meal_type + ' | party of ' + t.party_size +
-                ' | ' + t.snipe_rate + ' req/s | ' + t.snipe_timeout + 's timeout</span></div>' +
+                ' | ' + t.snipe_rate + ' req/s | ' + t.snipe_timeout + 's timeout' +
+                (t.start_date ? ' | from ' + t.start_date : '') +
+                (t.end_date ? ' | until ' + t.end_date : '') + '</span></div>' +
                 '<div class="target-actions">' +
                 '<button class="btn" onclick="editTarget(\'' + t.id + '\')">Edit</button>' +
                 '<button class="btn btn-danger" onclick="deleteTarget(\'' + t.id + '\')">Delete</button>' +
@@ -272,6 +278,8 @@ function saveTarget() {
         },
         preferred_times: prefList,
         preferred_seating: document.getElementById('t-seating').value || null,
+        start_date: document.getElementById('t-start-date').value || null,
+        end_date: document.getElementById('t-end-date').value || null,
         days_in_advance: parseInt(document.getElementById('t-days').value),
         max_retry_days: parseInt(document.getElementById('t-retries').value),
         drop_time: document.getElementById('t-drop').value,
@@ -307,6 +315,8 @@ function editTarget(id) {
         }
         document.getElementById('t-preferred').value = (t.preferred_times || []).join(', ');
         document.getElementById('t-seating').value = t.preferred_seating || '';
+        document.getElementById('t-start-date').value = t.start_date || '';
+        document.getElementById('t-end-date').value = t.end_date || '';
         document.getElementById('t-days').value = t.days_in_advance;
         document.getElementById('t-retries').value = t.max_retry_days;
         document.getElementById('t-drop').value = t.drop_time;
@@ -325,7 +335,7 @@ function deleteTarget(id) {
 }
 
 function clearTargetForm() {
-    ['t-id','t-venue-name','t-venue-id','t-preferred','t-seating'].forEach(function(id) { document.getElementById(id).value = ''; });
+    ['t-id','t-venue-name','t-venue-id','t-preferred','t-seating','t-start-date','t-end-date'].forEach(function(id) { document.getElementById(id).value = ''; });
     document.getElementById('t-id').dataset.editing = '';
     document.getElementById('t-party').value = '2';
     document.getElementById('t-meal').value = 'dinner';

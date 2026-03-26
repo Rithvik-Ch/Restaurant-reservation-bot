@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from datetime import time
+from datetime import date, time
 from pathlib import Path
 
 import click
@@ -244,6 +244,20 @@ def target_add(ctx, from_file):
         preferred_times = [time.fromisoformat(t.strip()) for t in preferred_str.split(",")]
 
     seating = click.prompt("Preferred seating (e.g. 'Dining Room', blank for any)", default="", show_default=False)
+
+    start_date_str = click.prompt(
+        "Start date for booking attempts (YYYY-MM-DD, blank for auto)",
+        default="",
+        show_default=False,
+    )
+    end_date_str = click.prompt(
+        "End date for booking attempts (YYYY-MM-DD, blank for no limit)",
+        default="",
+        show_default=False,
+    )
+    start_date_val = date.fromisoformat(start_date_str) if start_date_str else None
+    end_date_val = date.fromisoformat(end_date_str) if end_date_str else None
+
     days_ahead = click.prompt("Days in advance reservations open", type=int, default=14)
     drop_str = click.prompt("Drop time (HH:MM:SS)", default="00:00:00")
     drop_tz = click.prompt("Drop timezone", default="America/New_York")
@@ -261,6 +275,8 @@ def target_add(ctx, from_file):
         time_window=time_window,
         preferred_times=preferred_times,
         preferred_seating=seating or None,
+        start_date=start_date_val,
+        end_date=end_date_val,
         days_in_advance=days_ahead,
         drop_time=time.fromisoformat(drop_str),
         drop_timezone=drop_tz,

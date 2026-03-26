@@ -79,6 +79,7 @@ def _render_dashboard(targets, statuses) -> str:
                 <dt>Window</dt><dd>{window_str}</dd>
                 <dt>Drop</dt><dd>{t.drop_time.strftime('%H:%M:%S')} {t.drop_timezone}</dd>
                 <dt>Advance</dt><dd>{t.days_in_advance} days</dd>
+                <dt>Dates</dt><dd>{t.start_date or 'auto'} → {t.end_date or 'no limit'}</dd>
                 <dt>Rate</dt><dd>{t.snipe_rate} req/sec</dd>
                 <dt>Timeout</dt><dd>{t.snipe_timeout}s</dd>
                 {status_rows}

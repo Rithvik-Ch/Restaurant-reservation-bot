@@ -18,6 +18,10 @@ preferred_times:                  # Ordered by priority
   - "20:00"
 preferred_seating: "Dining Room"  # Optional: filter by seating type
 
+# Date range (optional — omit for automatic date calculation)
+# start_date: "2026-04-01"       # Earliest reservation date to target
+# end_date: "2026-04-30"         # Stop trying after this date
+
 # Scheduling
 days_in_advance: 14              # How far ahead the restaurant opens bookings
 drop_time: "00:00:00"            # When reservations become available (usually midnight)
