@@ -92,12 +92,13 @@ async def test_find_slots(client):
             },
         )
     )
-    slots = await client.find_slots("123", date(2025, 6, 15), 2)
+    slots, raw = await client.find_slots("123", date(2025, 6, 15), 2)
     assert len(slots) == 2
     assert slots[0].config_token == "config-1"
     assert slots[0].slot_time == time(19, 0)
     assert slots[0].table_type == "Dining Room"
     assert slots[1].payment_required is True
+    assert "results" in raw
     await client.close()
 
 
