@@ -318,7 +318,8 @@ def venue_search(ctx, query):
         try:
             results = await client.search_venues(query)
             if not results:
-                click.echo("No results found.")
+                click.echo("No results found via API.")
+                _show_manual_venue_instructions()
                 return
             click.echo(f"\nFound {len(results)} result(s):\n")
             for r in results:
@@ -327,10 +328,26 @@ def venue_search(ctx, query):
                 click.echo(f"  Location: {r['location']}")
                 click.echo(f"  Cuisine: {', '.join(r['cuisine']) if r['cuisine'] else 'N/A'}")
                 click.echo()
+        except Exception:
+            click.echo("Venue search API is unavailable.")
+            _show_manual_venue_instructions()
         finally:
             await client.close()
 
     asyncio.run(_search())
+
+
+def _show_manual_venue_instructions():
+    """Show instructions for finding venue ID manually."""
+    click.echo("\nYou can find the venue ID manually from the Resy website:\n")
+    click.echo("  1. Go to resy.com and search for the restaurant")
+    click.echo("  2. Click on the restaurant page")
+    click.echo("  3. Open Dev Tools (F12) > Network tab")
+    click.echo("  4. Look for a request to api.resy.com/4/find")
+    click.echo("  5. In the request payload/params, you'll see 'venue_id=XXXXX'")
+    click.echo("     That number is the venue ID.\n")
+    click.echo("  OR: Look at the URL — some pages show it as:")
+    click.echo("     resy.com/cities/ny/venue-name?venue_id=XXXXX\n")
 
 
 # ── Snipe commands ──

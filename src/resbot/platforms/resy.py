@@ -101,25 +101,36 @@ class ResyClient(ReservationPlatform):
 
     async def search_venues(self, query: str) -> list[dict]:
         """Search Resy for venues matching query."""
-        resp = await self._session.get(
-            "/3/venuesearch/search",
-            params={"query": query, "per_page": 10, "types": ["venue"]},
-        )
-        resp.raise_for_status()
-        data = orjson.loads(resp.content)
-        results = []
-        for hit in data.get("search", {}).get("hits", []):
-            results.append(
-                {
-                    "venue_id": str(hit.get("id", {}).get("resy", "")),
-                    "name": hit.get("name", ""),
-                    "location": hit.get("location", {}).get("name", ""),
-                    "cuisine": hit.get("cuisine", []),
-                    "price_range": hit.get("price_range_id", 0),
-                    "url_slug": hit.get("url_slug", ""),
-                }
-            )
-        return results
+        # Try POST to the search endpoint (Resy has changed methods over time)
+        for method, endpoint, payload in [
+            ("POST", "/3/venuesearch/search", {"query": query, "per_page": 10, "types": ["venue"]}),
+            ("GET", "/3/venuesearch/search", None),
+        ]:
+            try:
+                if method == "POST":
+                    resp = await self._session.post(endpoint, json=payload)
+                else:
+                    resp = await self._session.get(
+                        endpoint, params={"query": query, "per_page": 10}
+                    )
+                resp.raise_for_status()
+                data = orjson.loads(resp.content)
+                results = []
+                for hit in data.get("search", {}).get("hits", []):
+                    results.append(
+                        {
+                            "venue_id": str(hit.get("id", {}).get("resy", "")),
+                            "name": hit.get("name", ""),
+                            "location": hit.get("location", {}).get("name", ""),
+                            "cuisine": hit.get("cuisine", []),
+                            "price_range": hit.get("price_range_id", 0),
+                            "url_slug": hit.get("url_slug", ""),
+                        }
+                    )
+                return results
+            except Exception:
+                continue
+        raise RuntimeError("Venue search API is unavailable")
 
     async def find_slots(
         self, venue_id: str, day: date, party_size: int
