@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from datetime import date as date_type
 
 from resbot.config import load_profile, load_targets
 from resbot.models import BookingResult, UserProfile
@@ -62,7 +63,33 @@ async def run_scheduler(config_dir=None) -> None:
     await scheduler.stop()
 
 
-async def run_single_snipe(target_id: str, config_dir=None) -> BookingResult:
+def _compute_snipe_date(target, override_date=None):
+    """Compute the date to snipe for, with optional override."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    if override_date:
+        logger.info("Using override date: %s", override_date.isoformat())
+        return override_date
+
+    if target.target_date:
+        target_date = target.target_date
+    else:
+        tz = ZoneInfo(target.drop_timezone)
+        target_date = (datetime.now(tz) + timedelta(days=target.days_in_advance)).date()
+
+    # Clamp to start_date / end_date
+    if target.start_date and target_date < target.start_date:
+        target_date = target.start_date
+    if target.end_date and target_date > target.end_date:
+        return None  # signals past end_date
+
+    return target_date
+
+
+async def run_single_snipe(
+    target_id: str, config_dir=None, override_date: date_type | None = None
+) -> BookingResult:
     """Run a single immediate snipe attempt for a target."""
     from resbot.config import load_profile, load_target
     from resbot.platforms.resy import ResyClient
@@ -77,23 +104,13 @@ async def run_single_snipe(target_id: str, config_dir=None) -> BookingResult:
 
     try:
         await client.warmup()
-        from datetime import date, datetime, timedelta
-        from zoneinfo import ZoneInfo
 
-        if target.target_date:
-            target_date = target.target_date
-        else:
-            tz = ZoneInfo(target.drop_timezone)
-            target_date = (datetime.now(tz) + timedelta(days=target.days_in_advance)).date()
-
-        # Clamp to start_date / end_date
-        if target.start_date and target_date < target.start_date:
-            target_date = target.start_date
-        if target.end_date and target_date > target.end_date:
+        target_date = _compute_snipe_date(target, override_date)
+        if target_date is None:
             return BookingResult(
                 target_id=target.id,
                 success=False,
-                error=f"Computed date {target_date} is past end_date {target.end_date}",
+                error=f"Target date is past end_date {target.end_date}",
             )
 
         logger.info("Sniping %s for date %s", target.venue_name, target_date.isoformat())
@@ -103,12 +120,12 @@ async def run_single_snipe(target_id: str, config_dir=None) -> BookingResult:
         await client.close()
 
 
-async def run_all_snipes(config_dir=None) -> list[BookingResult]:
+async def run_all_snipes(
+    config_dir=None, override_date: date_type | None = None
+) -> list[BookingResult]:
     """Run immediate snipe attempts for all enabled targets concurrently."""
     from resbot.config import load_profile, load_targets
     from resbot.platforms.resy import ResyClient
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
 
     profile = load_profile(config_dir)
     targets = [t for t in load_targets(config_dir) if t.enabled]
@@ -123,19 +140,13 @@ async def run_all_snipes(config_dir=None) -> list[BookingResult]:
             raise ValueError(f"Unsupported platform: {target.platform}")
         try:
             await client.warmup()
-            if target.target_date:
-                target_date = target.target_date
-            else:
-                tz = ZoneInfo(target.drop_timezone)
-                target_date = (datetime.now(tz) + timedelta(days=target.days_in_advance)).date()
 
-            if target.start_date and target_date < target.start_date:
-                target_date = target.start_date
-            if target.end_date and target_date > target.end_date:
+            target_date = _compute_snipe_date(target, override_date)
+            if target_date is None:
                 return BookingResult(
                     target_id=target.id,
                     success=False,
-                    error=f"Computed date {target_date} is past end_date {target.end_date}",
+                    error=f"Target date is past end_date {target.end_date}",
                 )
 
             return await client.snipe(target, target_date)
