@@ -376,8 +376,9 @@ def _show_manual_venue_instructions():
 @cli.command("snipe")
 @click.argument("target_id", required=False)
 @click.option("--all", "snipe_all", is_flag=True, help="Snipe all enabled targets")
+@click.option("--date", "snipe_date", default=None, help="Override target date (YYYY-MM-DD)")
 @click.pass_context
-def snipe(ctx, target_id, snipe_all):
+def snipe(ctx, target_id, snipe_all, snipe_date):
     """Run an immediate snipe attempt."""
     config_dir = ctx.obj["config_dir"]
 
@@ -385,22 +386,65 @@ def snipe(ctx, target_id, snipe_all):
         click.echo("Specify a target ID or use --all", err=True)
         sys.exit(1)
 
+    override_date = date.fromisoformat(snipe_date) if snipe_date else None
+
     if snipe_all:
         from resbot.runner import run_all_snipes
 
-        results = asyncio.run(run_all_snipes(config_dir))
+        results = asyncio.run(run_all_snipes(config_dir, override_date=override_date))
         for r in results:
             icon = "OK" if r.success else "FAIL"
             click.echo(f"  [{icon}] {r.target_id}: {r.error or r.confirmation_token or 'booked'}")
     else:
         from resbot.runner import run_single_snipe
 
-        result = asyncio.run(run_single_snipe(target_id, config_dir))
+        result = asyncio.run(run_single_snipe(target_id, config_dir, override_date=override_date))
         if result.success:
             click.echo(f"SUCCESS! Confirmation: {result.confirmation_token}")
         else:
             click.echo(f"Failed: {result.error}", err=True)
             sys.exit(1)
+
+
+# ── Test find (dry run) ──
+
+
+@cli.command("test-find")
+@click.argument("target_id")
+@click.option("--date", "find_date", required=True, help="Date to search (YYYY-MM-DD)")
+@click.pass_context
+def test_find(ctx, target_id, find_date):
+    """Dry run: find available slots without booking. Shows what the API returns."""
+    config_dir = ctx.obj["config_dir"]
+    from resbot.config import load_target
+
+    target = load_target(target_id, config_dir)
+    search_date = date.fromisoformat(find_date)
+
+    async def _find():
+        profile = load_profile(config_dir)
+        from resbot.platforms.resy import ResyClient
+
+        client = ResyClient(profile)
+        try:
+            click.echo(f"Searching {target.venue_name} (ID: {target.venue_id}) for {search_date} party of {target.party_size}...")
+            slots = await client.find_slots(target.venue_id, search_date, target.party_size)
+            click.echo(f"\nRaw API returned {len(slots)} slot(s):\n")
+            for s in slots:
+                click.echo(f"  {s.slot_time.strftime('%H:%M')}  type={s.table_type!r}  shift={s.shift_label!r}  token={s.config_token[:20]}...")
+
+            if slots:
+                from resbot.engine import rank_slots
+                ranked = rank_slots(slots, target)
+                click.echo(f"\nAfter filtering/ranking: {len(ranked)} slot(s)")
+                for s in ranked[:10]:
+                    click.echo(f"  {s.slot_time.strftime('%H:%M')}  type={s.table_type!r}")
+            else:
+                click.echo("No slots returned by API. Run with -v for debug details.")
+        finally:
+            await client.close()
+
+    asyncio.run(_find())
 
 
 # ── Run scheduler ──

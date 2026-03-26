@@ -149,18 +149,34 @@ class ResyClient(ReservationPlatform):
         resp.raise_for_status()
         data = orjson.loads(resp.content)
 
+        # Log the top-level keys so we can diagnose parsing issues
+        logger.debug("API /4/find response keys: %s", list(data.keys()))
+
         slots = []
-        for venue in data.get("results", {}).get("venues", []):
-            for slot_data in venue.get("slots", []):
+
+        # Try primary path: results.venues[].slots[]
+        venues = data.get("results", {}).get("venues", [])
+        logger.debug("Found %d venue(s) in results.venues", len(venues))
+
+        for venue in venues:
+            venue_slots = venue.get("slots", [])
+            logger.debug(
+                "Venue has %d slot(s), keys: %s",
+                len(venue_slots),
+                list(venue.keys()),
+            )
+            for slot_data in venue_slots:
                 config = slot_data.get("config", {})
                 dt = slot_data.get("date", {})
                 start_str = dt.get("start", "")
                 if not start_str:
+                    logger.debug("Slot missing start time, keys: %s", list(slot_data.keys()))
                     continue
                 try:
                     slot_dt = datetime.fromisoformat(start_str)
                     slot_time = slot_dt.time()
                 except (ValueError, TypeError):
+                    logger.debug("Could not parse slot time: %s", start_str)
                     continue
                 slots.append(
                     Slot(
@@ -172,6 +188,44 @@ class ResyClient(ReservationPlatform):
                         payment_required=bool(slot_data.get("payment", {}).get("is_paid")),
                     )
                 )
+
+        # If primary path found nothing, try alternate response structures
+        if not slots:
+            # Some Resy responses put slots directly under results
+            raw_slots = data.get("results", {}).get("slots", [])
+            if raw_slots:
+                logger.info("No slots in venues path, found %d in results.slots", len(raw_slots))
+                for slot_data in raw_slots:
+                    config = slot_data.get("config", {})
+                    dt = slot_data.get("date", {})
+                    start_str = dt.get("start", "")
+                    if not start_str:
+                        continue
+                    try:
+                        slot_dt = datetime.fromisoformat(start_str)
+                        slot_time = slot_dt.time()
+                    except (ValueError, TypeError):
+                        continue
+                    slots.append(
+                        Slot(
+                            config_token=config.get("token", ""),
+                            slot_time=slot_time,
+                            date=day,
+                            table_type=config.get("type", ""),
+                            shift_label=slot_data.get("shift", {}).get("label", ""),
+                            payment_required=bool(slot_data.get("payment", {}).get("is_paid")),
+                        )
+                    )
+
+        if not slots:
+            # Log a snippet of the raw response to help debug
+            raw_preview = resp.text[:500] if len(resp.text) > 500 else resp.text
+            logger.warning(
+                "find_slots returned 0 slots for venue=%s date=%s party=%d. "
+                "Response preview: %s",
+                venue_id, day.isoformat(), party_size, raw_preview,
+            )
+
         return slots
 
     async def get_booking_token(
