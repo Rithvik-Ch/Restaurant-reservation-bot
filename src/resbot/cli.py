@@ -64,37 +64,57 @@ def profile_setup(ctx):
 
     click.echo("=== resbot Profile Setup ===\n")
 
-    click.echo("--- Resy Login ---")
-    click.echo("Enter your Resy account email and password.")
-    click.echo("The bot will log in and grab your auth token automatically.\n")
+    name = click.prompt("Your name")
+    phone = click.prompt("Phone number (e.g. +15551234567)")
+    email = click.prompt("Email")
 
-    resy_email = click.prompt("Resy email")
+    click.echo("\n--- Resy Credentials ---")
+    click.echo("We'll try to log in automatically first.\n")
+
+    resy_email = click.prompt("Resy email (the one you use to log in at resy.com)")
     resy_password = click.prompt("Resy password", hide_input=True)
 
-    click.echo("\nLogging in to Resy...")
+    click.echo("\nAttempting auto-login...")
 
+    creds = {}
     try:
         from resbot.platforms.resy import ResyClient
 
         creds = asyncio.run(ResyClient.login(resy_email, resy_password))
-    except Exception as e:
-        click.echo(f"\nLogin failed: {e}", err=True)
-        click.echo("You can still set up your profile and try again later with 'resbot login'.")
-        creds = {}
+        click.echo(f"Success! Logged in as {creds.get('first_name', '')} {creds.get('last_name', '')}")
+    except Exception:
+        click.echo("\nAuto-login didn't work (Resy sometimes blocks this).")
+        click.echo("No worries — you can grab the credentials from your browser instead.\n")
+        click.echo("Here's how:")
+        click.echo("  1. Go to resy.com and log in")
+        click.echo("  2. Open any restaurant page")
+        click.echo("  3. Press F12 (or right-click > Inspect) to open Developer Tools")
+        click.echo("  4. Click the 'Network' tab")
+        click.echo("  5. Refresh the page")
+        click.echo("  6. In the list of requests, click any one that goes to 'api.resy.com'")
+        click.echo("  7. Scroll down to 'Request Headers' and find:")
+        click.echo('     - Authorization: ResyAPI api_key="YOUR_API_KEY"')
+        click.echo("     - x-resy-auth-token: YOUR_AUTH_TOKEN")
+        click.echo("  8. Copy those two values below\n")
 
-    if creds:
-        click.echo(f"Logged in as {creds.get('first_name', '')} {creds.get('last_name', '')}")
-        click.echo(f"Payment method: {'found' if creds.get('payment_method_id') else 'none on file'}")
+        resy_api_key = click.prompt("Resy API key (the part inside the quotes after api_key=)")
+        resy_auth_token = click.prompt("Resy auth token (the x-resy-auth-token value)")
+        creds = {
+            "api_key": resy_api_key,
+            "auth_token": resy_auth_token,
+            "payment_method_id": "",
+        }
 
-    name = click.prompt(
-        "\nYour name",
-        default=f"{creds.get('first_name', '')} {creds.get('last_name', '')}".strip() or None,
-    )
-    phone = click.prompt(
-        "Phone number",
-        default=creds.get("phone", "") or None,
-    )
-    email = click.prompt("Email", default=resy_email)
+    resy_payment_id = creds.get("payment_method_id", "")
+    if not resy_payment_id:
+        click.echo("\nPayment method ID not found automatically.")
+        click.echo("To find it: in the same Network tab, look for a request to")
+        click.echo("api.resy.com/2/user — the response JSON has 'payment_methods' with an 'id'.")
+        resy_payment_id = click.prompt(
+            "Resy payment method ID (or press Enter to skip for now)",
+            default="",
+            show_default=False,
+        )
 
     p = UserProfile(
         name=name,
@@ -104,10 +124,11 @@ def profile_setup(ctx):
         resy_auth_token=creds.get("auth_token", ""),
         resy_email=resy_email,
         resy_password=resy_password,
-        resy_payment_method_id=creds.get("payment_method_id") or None,
+        resy_payment_method_id=resy_payment_id or None,
     )
     path = save_profile(p, config_dir)
     click.echo(f"\nProfile saved to {path}")
+    click.echo("Run 'python3 run.py profile show' to verify.")
 
 
 @profile.command("login")
