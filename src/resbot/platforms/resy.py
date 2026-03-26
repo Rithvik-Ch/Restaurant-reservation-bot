@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from datetime import date, datetime, time
 
 import httpx
@@ -22,6 +23,11 @@ from resbot.platforms.base import ReservationPlatform
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.resy.com"
+
+
+def _print(msg: str) -> None:
+    """Print to stderr so the user always sees it, even without -v."""
+    print(msg, file=sys.stderr, flush=True)
 
 
 class ResyClient(ReservationPlatform):
@@ -97,7 +103,7 @@ class ResyClient(ReservationPlatform):
             payment_methods = data.get("payment_methods", [])
             if payment_methods:
                 self._payment_method_id = str(payment_methods[0].get("id", ""))
-                logger.info("Auto-detected payment method: %s", self._payment_method_id)
+                _print(f"[auth] Auto-detected payment method: {self._payment_method_id}")
 
     async def search_venues(self, query: str) -> list[dict]:
         """Search Resy for venues matching query."""
@@ -134,8 +140,8 @@ class ResyClient(ReservationPlatform):
 
     async def find_slots(
         self, venue_id: str, day: date, party_size: int
-    ) -> list[Slot]:
-        """Find available slots. Optimized for minimal parsing."""
+    ) -> tuple[list[Slot], dict]:
+        """Find available slots. Returns (slots, raw_response_dict)."""
         resp = await self._session.get(
             "/4/find",
             params={
@@ -149,84 +155,49 @@ class ResyClient(ReservationPlatform):
         resp.raise_for_status()
         data = orjson.loads(resp.content)
 
-        # Log the top-level keys so we can diagnose parsing issues
-        logger.debug("API /4/find response keys: %s", list(data.keys()))
-
         slots = []
 
         # Try primary path: results.venues[].slots[]
         venues = data.get("results", {}).get("venues", [])
-        logger.debug("Found %d venue(s) in results.venues", len(venues))
 
         for venue in venues:
             venue_slots = venue.get("slots", [])
-            logger.debug(
-                "Venue has %d slot(s), keys: %s",
-                len(venue_slots),
-                list(venue.keys()),
-            )
             for slot_data in venue_slots:
-                config = slot_data.get("config", {})
-                dt = slot_data.get("date", {})
-                start_str = dt.get("start", "")
-                if not start_str:
-                    logger.debug("Slot missing start time, keys: %s", list(slot_data.keys()))
-                    continue
-                try:
-                    slot_dt = datetime.fromisoformat(start_str)
-                    slot_time = slot_dt.time()
-                except (ValueError, TypeError):
-                    logger.debug("Could not parse slot time: %s", start_str)
-                    continue
-                slots.append(
-                    Slot(
-                        config_token=config.get("token", ""),
-                        slot_time=slot_time,
-                        date=day,
-                        table_type=config.get("type", ""),
-                        shift_label=slot_data.get("shift", {}).get("label", ""),
-                        payment_required=bool(slot_data.get("payment", {}).get("is_paid")),
-                    )
-                )
+                slot = self._parse_slot(slot_data, day)
+                if slot:
+                    slots.append(slot)
 
         # If primary path found nothing, try alternate response structures
         if not slots:
-            # Some Resy responses put slots directly under results
             raw_slots = data.get("results", {}).get("slots", [])
-            if raw_slots:
-                logger.info("No slots in venues path, found %d in results.slots", len(raw_slots))
-                for slot_data in raw_slots:
-                    config = slot_data.get("config", {})
-                    dt = slot_data.get("date", {})
-                    start_str = dt.get("start", "")
-                    if not start_str:
-                        continue
-                    try:
-                        slot_dt = datetime.fromisoformat(start_str)
-                        slot_time = slot_dt.time()
-                    except (ValueError, TypeError):
-                        continue
-                    slots.append(
-                        Slot(
-                            config_token=config.get("token", ""),
-                            slot_time=slot_time,
-                            date=day,
-                            table_type=config.get("type", ""),
-                            shift_label=slot_data.get("shift", {}).get("label", ""),
-                            payment_required=bool(slot_data.get("payment", {}).get("is_paid")),
-                        )
-                    )
+            for slot_data in raw_slots:
+                slot = self._parse_slot(slot_data, day)
+                if slot:
+                    slots.append(slot)
 
-        if not slots:
-            # Log a snippet of the raw response to help debug
-            raw_preview = resp.text[:500] if len(resp.text) > 500 else resp.text
-            logger.warning(
-                "find_slots returned 0 slots for venue=%s date=%s party=%d. "
-                "Response preview: %s",
-                venue_id, day.isoformat(), party_size, raw_preview,
-            )
+        return slots, data
 
-        return slots
+    @staticmethod
+    def _parse_slot(slot_data: dict, day: date) -> Slot | None:
+        """Parse a single slot from API response. Returns None on failure."""
+        config = slot_data.get("config", {})
+        dt = slot_data.get("date", {})
+        start_str = dt.get("start", "")
+        if not start_str:
+            return None
+        try:
+            slot_dt = datetime.fromisoformat(start_str)
+            slot_time = slot_dt.time()
+        except (ValueError, TypeError):
+            return None
+        return Slot(
+            config_token=config.get("token", ""),
+            slot_time=slot_time,
+            date=day,
+            table_type=config.get("type", ""),
+            shift_label=slot_data.get("shift", {}).get("label", ""),
+            payment_required=bool(slot_data.get("payment", {}).get("is_paid")),
+        )
 
     async def get_booking_token(
         self, slot: Slot, day: date, party_size: int
@@ -287,8 +258,9 @@ class ResyClient(ReservationPlatform):
     async def snipe(self, target: ReservationTarget, day: date) -> BookingResult:
         """Speed-optimized snipe: burst requests with configurable rate and timeout.
 
-        Uses target.snipe_rate (requests/sec) and target.snipe_timeout (seconds)
-        to control the burst. Stops immediately on success or when timeout expires.
+        1. First does an immediate check — if slots are already open, books right away.
+        2. If no slots yet, enters burst polling loop at target.snipe_rate until
+           target.snipe_timeout expires.
         """
         import time as _time
 
@@ -302,36 +274,60 @@ class ResyClient(ReservationPlatform):
         deadline = _time.monotonic() + target.snipe_timeout
         attempt = 0
 
-        logger.info(
-            "Starting snipe: venue=%s date=%s party=%d rate=%.1f/s timeout=%ds",
-            target.venue_id, day.isoformat(), target.party_size,
-            target.snipe_rate, target.snipe_timeout,
-        )
+        _print(f"[snipe] Starting: venue={target.venue_id} date={day} party={target.party_size} rate={target.snipe_rate}/s timeout={target.snipe_timeout}s")
 
         while _time.monotonic() < deadline:
             attempt += 1
             try:
-                slots = await self.find_slots(target.venue_id, day, target.party_size)
+                slots, raw_data = await self.find_slots(target.venue_id, day, target.party_size)
+
+                # Always print first few attempts and then every 10th
                 if attempt <= 3 or attempt % 10 == 0:
-                    logger.info("Attempt %d: found %d raw slot(s)", attempt, len(slots))
+                    _print(f"[snipe] Attempt {attempt}: {len(slots)} raw slot(s) from API")
+
+                # On first attempt with no slots, dump diagnostics
+                if attempt == 1 and not slots:
+                    results_keys = list(raw_data.get("results", {}).keys())
+                    venues = raw_data.get("results", {}).get("venues", [])
+                    _print(f"[snipe] API response results keys: {results_keys}")
+                    _print(f"[snipe] Venues in response: {len(venues)}")
+                    if venues:
+                        v = venues[0]
+                        _print(f"[snipe] First venue keys: {list(v.keys())}")
+                        _print(f"[snipe] First venue slots count: {len(v.get('slots', []))}")
+                    # Show a compact preview of the raw JSON
+                    raw_str = orjson.dumps(raw_data).decode()
+                    preview = raw_str[:800]
+                    _print(f"[snipe] Raw response preview: {preview}")
+
                 ranked = rank_slots(slots, target)
+
+                if attempt <= 3 or attempt % 10 == 0:
+                    if slots:
+                        slot_times = ", ".join(s.slot_time.strftime("%H:%M") for s in slots[:8])
+                        _print(f"[snipe]   Slot times: {slot_times}")
+                        _print(f"[snipe]   After ranking: {len(ranked)} slot(s)")
+
                 if not ranked:
                     await asyncio.sleep(sleep_interval)
                     continue
 
                 # Try top 3 slots in parallel
                 top_slots = ranked[:3]
+                _print(f"[snipe] Booking top {len(top_slots)} slot(s): {', '.join(s.slot_time.strftime('%H:%M') for s in top_slots)}")
                 tasks = [
                     self._try_book_slot(slot, day, target.party_size)
                     for slot in top_slots
                 ]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                for result in results:
+                for i, result in enumerate(results):
                     if isinstance(result, BookingResult) and result.success:
                         result.target_id = target.id
-                        logger.info("Snipe succeeded on attempt %d", attempt)
+                        _print(f"[snipe] SUCCESS on attempt {attempt}! Confirmation: {result.confirmation_token}")
                         return result
+                    elif isinstance(result, Exception):
+                        _print(f"[snipe] Slot {top_slots[i].slot_time.strftime('%H:%M')} booking error: {result}")
 
                 best_result = BookingResult(
                     target_id=target.id,
@@ -340,16 +336,16 @@ class ResyClient(ReservationPlatform):
                 )
                 await asyncio.sleep(sleep_interval)
             except httpx.HTTPStatusError as e:
+                _print(f"[snipe] HTTP {e.response.status_code} on attempt {attempt}: {e.response.text[:200]}")
                 if e.response.status_code == 412:
                     await asyncio.sleep(sleep_interval)
                     continue
-                logger.warning("HTTP error during snipe attempt %d: %s", attempt, e)
                 await asyncio.sleep(sleep_interval)
             except Exception as e:
-                logger.warning("Error during snipe attempt %d: %s", attempt, e)
+                _print(f"[snipe] Error on attempt {attempt}: {type(e).__name__}: {e}")
                 await asyncio.sleep(sleep_interval)
 
-        logger.info("Snipe timed out after %d attempts (%ds)", attempt, target.snipe_timeout)
+        _print(f"[snipe] Timed out after {attempt} attempts ({target.snipe_timeout}s)")
         return best_result
 
     async def _try_book_slot(

@@ -406,6 +406,66 @@ def snipe(ctx, target_id, snipe_all, snipe_date):
             sys.exit(1)
 
 
+# ── Grab (immediate book for already-open slots) ──
+
+
+@cli.command("grab")
+@click.argument("target_id")
+@click.option("--date", "grab_date", required=True, help="Reservation date (YYYY-MM-DD)")
+@click.pass_context
+def grab(ctx, target_id, grab_date):
+    """Immediately find and book an already-open slot. No waiting for drop time."""
+    config_dir = ctx.obj["config_dir"]
+    from resbot.config import load_target
+
+    target = load_target(target_id, config_dir)
+    search_date = date.fromisoformat(grab_date)
+
+    async def _grab():
+        from resbot.engine import rank_slots
+        from resbot.platforms.resy import ResyClient
+
+        profile = load_profile(config_dir)
+        client = ResyClient(profile)
+        try:
+            click.echo(f"Looking for slots at {target.venue_name} on {search_date} (party of {target.party_size})...")
+            await client.warmup()
+            slots, raw_data = await client.find_slots(target.venue_id, search_date, target.party_size)
+            click.echo(f"Found {len(slots)} raw slot(s)")
+
+            if not slots:
+                import orjson
+                raw_str = orjson.dumps(raw_data).decode()
+                click.echo(f"No slots found. Raw API response ({len(raw_str)} bytes):")
+                click.echo(raw_str[:2000])
+                sys.exit(1)
+
+            for s in slots:
+                click.echo(f"  {s.slot_time.strftime('%H:%M')}  {s.table_type!r}")
+
+            ranked = rank_slots(slots, target)
+            click.echo(f"\n{len(ranked)} slot(s) after filtering. Attempting to book top match...")
+
+            for slot in ranked[:3]:
+                click.echo(f"  Trying {slot.slot_time.strftime('%H:%M')} ({slot.table_type})...")
+                try:
+                    token = await client.get_booking_token(slot, search_date, target.party_size)
+                    result = await client.book(token)
+                    if result.success:
+                        click.echo(f"\nSUCCESS! Booked {slot.slot_time.strftime('%H:%M')}")
+                        click.echo(f"Confirmation: {result.confirmation_token}")
+                        return
+                except Exception as e:
+                    click.echo(f"  Failed: {e}")
+
+            click.echo("\nCould not book any slot.", err=True)
+            sys.exit(1)
+        finally:
+            await client.close()
+
+    asyncio.run(_grab())
+
+
 # ── Test find (dry run) ──
 
 
@@ -428,10 +488,24 @@ def test_find(ctx, target_id, find_date):
         client = ResyClient(profile)
         try:
             click.echo(f"Searching {target.venue_name} (ID: {target.venue_id}) for {search_date} party of {target.party_size}...")
-            slots = await client.find_slots(target.venue_id, search_date, target.party_size)
-            click.echo(f"\nRaw API returned {len(slots)} slot(s):\n")
+            click.echo(f"Using API key: {profile.resy_api_key[:8]}... Auth token: {profile.resy_auth_token[:8]}...")
+            slots, raw_data = await client.find_slots(target.venue_id, search_date, target.party_size)
+
+            # Always show raw API structure
+            results_keys = list(raw_data.get("results", {}).keys())
+            venues = raw_data.get("results", {}).get("venues", [])
+            click.echo(f"\nAPI response structure:")
+            click.echo(f"  Top-level keys: {list(raw_data.keys())}")
+            click.echo(f"  results keys: {results_keys}")
+            click.echo(f"  venues count: {len(venues)}")
+            if venues:
+                v = venues[0]
+                click.echo(f"  First venue keys: {list(v.keys())}")
+                click.echo(f"  First venue slot count: {len(v.get('slots', []))}")
+
+            click.echo(f"\nParsed {len(slots)} slot(s):\n")
             for s in slots:
-                click.echo(f"  {s.slot_time.strftime('%H:%M')}  type={s.table_type!r}  shift={s.shift_label!r}  token={s.config_token[:20]}...")
+                click.echo(f"  {s.slot_time.strftime('%H:%M')}  type={s.table_type!r}  shift={s.shift_label!r}  token={s.config_token[:30]}...")
 
             if slots:
                 from resbot.engine import rank_slots
@@ -440,7 +514,10 @@ def test_find(ctx, target_id, find_date):
                 for s in ranked[:10]:
                     click.echo(f"  {s.slot_time.strftime('%H:%M')}  type={s.table_type!r}")
             else:
-                click.echo("No slots returned by API. Run with -v for debug details.")
+                import orjson
+                raw_str = orjson.dumps(raw_data).decode()
+                click.echo(f"\nNo slots parsed. Raw API response ({len(raw_str)} bytes):")
+                click.echo(raw_str[:2000])
         finally:
             await client.close()
 
