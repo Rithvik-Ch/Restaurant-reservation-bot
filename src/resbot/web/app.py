@@ -61,15 +61,15 @@ def create_app(config_dir: Path | None = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
         targets = load_targets(config_dir)
-        statuses = scheduler.statuses if scheduler else {}
+        statuses = dict(scheduler.statuses) if scheduler else {}
+        context = {
+            "request": request,
+            "targets": targets,
+            "statuses": statuses,
+            "now": datetime.now().isoformat(),
+        }
         return templates.TemplateResponse(
-            "dashboard.html",
-            {
-                "request": request,
-                "targets": targets,
-                "statuses": statuses,
-                "now": datetime.now().isoformat(),
-            },
+            request=request, name="dashboard.html", context=context
         )
 
     @app.get("/api/status")
