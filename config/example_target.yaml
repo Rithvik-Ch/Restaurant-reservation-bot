@@ -1,0 +1,27 @@
+# Example reservation target configuration
+# Copy to ~/.resbot/targets/<name>.yaml
+
+id: example-dinner
+platform: resy                    # "resy" or "opentable"
+venue_id: "12345"                 # Use 'resbot venue <query>' to find this
+venue_name: "Example Restaurant"
+party_size: 2
+meal_type: dinner                 # breakfast, brunch, lunch, dinner
+
+# Time preferences (optional - defaults based on meal_type)
+time_window:
+  earliest: "18:30"
+  latest: "20:30"
+preferred_times:                  # Ordered by priority
+  - "19:00"
+  - "19:30"
+  - "20:00"
+preferred_seating: "Dining Room"  # Optional: filter by seating type
+
+# Scheduling
+days_in_advance: 14              # How far ahead the restaurant opens bookings
+drop_time: "00:00:00"            # When reservations become available (usually midnight)
+drop_timezone: "America/New_York"
+max_retry_days: 30               # Give up after this many failed attempts
+
+enabled: true

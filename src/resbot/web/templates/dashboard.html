@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>resbot Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e1e4e8; padding: 20px; }
+        h1 { font-size: 1.5rem; margin-bottom: 20px; color: #58a6ff; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); gap: 16px; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .card-title { font-size: 1.1rem; font-weight: 600; }
+        .badge { padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
+        .badge-active { background: #1f6feb33; color: #58a6ff; }
+        .badge-success { background: #23863533; color: #3fb950; }
+        .badge-failed { background: #da363333; color: #f85149; }
+        .badge-disabled { background: #30363d; color: #8b949e; }
+        .info { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 0.85rem; }
+        .info dt { color: #8b949e; }
+        .info dd { color: #c9d1d9; }
+        .btn { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; }
+        .btn:hover { background: #30363d; }
+        .log { margin-top: 20px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; max-height: 300px; overflow-y: auto; }
+        .log-entry { font-family: monospace; font-size: 0.8rem; padding: 2px 0; color: #8b949e; }
+        .log-entry.success { color: #3fb950; }
+        .log-entry.error { color: #f85149; }
+        .empty { text-align: center; padding: 40px; color: #8b949e; }
+    </style>
+</head>
+<body>
+    <h1>resbot Dashboard</h1>
+
+    {% if not targets %}
+    <div class="empty">
+        <p>No targets configured. Use <code>resbot target add</code> to create one.</p>
+    </div>
+    {% else %}
+    <div class="grid">
+        {% for t in targets %}
+        {% set status = statuses.get(t.id) %}
+        <div class="card" id="card-{{ t.id }}">
+            <div class="card-header">
+                <span class="card-title">{{ t.venue_name }}</span>
+                {% if status and status.completed and status.last_result and status.last_result.success %}
+                <span class="badge badge-success">BOOKED</span>
+                {% elif not t.enabled %}
+                <span class="badge badge-disabled">DISABLED</span>
+                {% elif status and status.completed %}
+                <span class="badge badge-failed">MAX RETRIES</span>
+                {% else %}
+                <span class="badge badge-active">ACTIVE</span>
+                {% endif %}
+            </div>
+            <dl class="info">
+                <dt>Platform</dt><dd>{{ t.platform }}</dd>
+                <dt>Meal</dt><dd>{{ t.meal_type.value | title }}</dd>
+                <dt>Party</dt><dd>{{ t.party_size }}</dd>
+                <dt>Window</dt><dd>{{ t.effective_window.earliest.strftime('%H:%M') }} - {{ t.effective_window.latest.strftime('%H:%M') }}</dd>
+                <dt>Drop</dt><dd>{{ t.drop_time.strftime('%H:%M:%S') }} {{ t.drop_timezone }}</dd>
+                <dt>Advance</dt><dd>{{ t.days_in_advance }} days</dd>
+                {% if status %}
+                <dt>Attempts</dt><dd>{{ status.attempts }} / {{ t.max_retry_days }}</dd>
+                <dt>Last Try</dt><dd>{{ status.last_attempt.strftime('%Y-%m-%d %H:%M:%S') if status.last_attempt else 'Never' }}</dd>
+                <dt>Next Try</dt><dd>{{ status.next_attempt.strftime('%Y-%m-%d %H:%M:%S') if status.next_attempt else 'N/A' }}</dd>
+                {% if status.last_result %}
+                <dt>Last Result</dt><dd>{{ 'Success' if status.last_result.success else status.last_result.error }}</dd>
+                {% endif %}
+                {% endif %}
+            </dl>
+            <div style="margin-top: 12px;">
+                <button class="btn" onclick="toggleTarget('{{ t.id }}')">
+                    {{ 'Disable' if t.enabled else 'Enable' }}
+                </button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="log" id="log">
+        <div class="log-entry">Listening for events...</div>
+    </div>
+
+    <script>
+        const log = document.getElementById('log');
+
+        function addLog(msg, cls = '') {
+            const div = document.createElement('div');
+            div.className = 'log-entry ' + cls;
+            div.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+            log.prepend(div);
+            if (log.children.length > 200) log.removeChild(log.lastChild);
+        }
+
+        async function toggleTarget(id) {
+            const resp = await fetch('/api/targets/' + id + '/toggle', { method: 'POST' });
+            const data = await resp.json();
+            addLog('Target ' + id + ' ' + (data.enabled ? 'enabled' : 'disabled'));
+            setTimeout(() => location.reload(), 500);
+        }
+
+        const evtSource = new EventSource('/api/events');
+        evtSource.addEventListener('result', function(e) {
+            const data = JSON.parse(e.data);
+            if (data.success) {
+                addLog('BOOKED: ' + data.target_id + ' - ' + (data.confirmation_token || ''), 'success');
+            } else {
+                addLog('FAILED: ' + data.target_id + ' - ' + (data.error || ''), 'error');
+            }
+        });
+        evtSource.addEventListener('ping', function() {});
+        evtSource.onerror = function() { addLog('Connection lost, reconnecting...', 'error'); };
+
+        // Poll status every 30s
+        setInterval(async () => {
+            try {
+                const resp = await fetch('/api/status');
+                const data = await resp.json();
+                addLog('Status refreshed: ' + Object.keys(data.targets).length + ' targets');
+            } catch (e) {}
+        }, 30000);
+    </script>
+</body>
+</html>
