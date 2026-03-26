@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from datetime import time
+from datetime import date, time
 from pathlib import Path
 
 import click
@@ -69,26 +69,100 @@ def profile_setup(ctx):
     email = click.prompt("Email")
 
     click.echo("\n--- Resy Credentials ---")
-    click.echo("Get your API key and auth token from the Resy website.")
-    click.echo("Open browser dev tools → Network tab → look for requests to api.resy.com")
-    resy_api_key = click.prompt("Resy API key", default="", show_default=False)
-    resy_auth_token = click.prompt("Resy auth token", default="", show_default=False)
-    resy_payment_id = click.prompt(
-        "Resy payment method ID (leave blank to auto-detect)",
-        default="",
-        show_default=False,
-    )
+    click.echo("We'll try to log in automatically first.\n")
+
+    resy_email = click.prompt("Resy email (the one you use to log in at resy.com)")
+    resy_password = click.prompt("Resy password", hide_input=True)
+
+    click.echo("\nAttempting auto-login...")
+
+    creds = {}
+    try:
+        from resbot.platforms.resy import ResyClient
+
+        creds = asyncio.run(ResyClient.login(resy_email, resy_password))
+        click.echo(f"Success! Logged in as {creds.get('first_name', '')} {creds.get('last_name', '')}")
+    except Exception:
+        click.echo("\nAuto-login didn't work (Resy sometimes blocks this).")
+        click.echo("No worries — you can grab the credentials from your browser instead.\n")
+        click.echo("Here's how:")
+        click.echo("  1. Go to resy.com and log in")
+        click.echo("  2. Open any restaurant page")
+        click.echo("  3. Press F12 (or right-click > Inspect) to open Developer Tools")
+        click.echo("  4. Click the 'Network' tab")
+        click.echo("  5. Refresh the page")
+        click.echo("  6. In the list of requests, click any one that goes to 'api.resy.com'")
+        click.echo("  7. Scroll down to 'Request Headers' and find:")
+        click.echo('     - Authorization: ResyAPI api_key="YOUR_API_KEY"')
+        click.echo("     - x-resy-auth-token: YOUR_AUTH_TOKEN")
+        click.echo("  8. Copy those two values below\n")
+
+        resy_api_key = click.prompt("Resy API key (the part inside the quotes after api_key=)")
+        resy_auth_token = click.prompt("Resy auth token (the x-resy-auth-token value)")
+        creds = {
+            "api_key": resy_api_key,
+            "auth_token": resy_auth_token,
+            "payment_method_id": "",
+        }
+
+    resy_payment_id = creds.get("payment_method_id", "")
+    if not resy_payment_id:
+        click.echo("\nPayment method ID not found automatically.")
+        click.echo("To find it: in the same Network tab, look for a request to")
+        click.echo("api.resy.com/2/user — the response JSON has 'payment_methods' with an 'id'.")
+        resy_payment_id = click.prompt(
+            "Resy payment method ID (or press Enter to skip for now)",
+            default="",
+            show_default=False,
+        )
 
     p = UserProfile(
         name=name,
         phone=phone,
         email=email,
-        resy_api_key=resy_api_key,
-        resy_auth_token=resy_auth_token,
+        resy_api_key=creds.get("api_key", ""),
+        resy_auth_token=creds.get("auth_token", ""),
+        resy_email=resy_email,
+        resy_password=resy_password,
         resy_payment_method_id=resy_payment_id or None,
     )
     path = save_profile(p, config_dir)
     click.echo(f"\nProfile saved to {path}")
+    click.echo("Run 'python3 run.py profile show' to verify.")
+
+
+@profile.command("login")
+@click.pass_context
+def profile_login(ctx):
+    """Refresh Resy auth token by logging in again."""
+    config_dir = ctx.obj["config_dir"]
+    try:
+        p = load_profile(config_dir)
+    except FileNotFoundError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+
+    resy_email = p.resy_email or click.prompt("Resy email")
+    resy_password = p.resy_password or click.prompt("Resy password", hide_input=True)
+
+    click.echo("Logging in to Resy...")
+    try:
+        from resbot.platforms.resy import ResyClient
+
+        creds = asyncio.run(ResyClient.login(resy_email, resy_password))
+    except Exception as e:
+        click.echo(f"Login failed: {e}", err=True)
+        sys.exit(1)
+
+    p.resy_api_key = creds["api_key"]
+    p.resy_auth_token = creds["auth_token"]
+    p.resy_email = resy_email
+    p.resy_password = resy_password
+    if creds.get("payment_method_id"):
+        p.resy_payment_method_id = creds["payment_method_id"]
+
+    save_profile(p, config_dir)
+    click.echo("Auth token refreshed successfully.")
 
 
 @profile.command("show")
@@ -170,10 +244,26 @@ def target_add(ctx, from_file):
         preferred_times = [time.fromisoformat(t.strip()) for t in preferred_str.split(",")]
 
     seating = click.prompt("Preferred seating (e.g. 'Dining Room', blank for any)", default="", show_default=False)
+
+    start_date_str = click.prompt(
+        "Start date for booking attempts (YYYY-MM-DD, blank for auto)",
+        default="",
+        show_default=False,
+    )
+    end_date_str = click.prompt(
+        "End date for booking attempts (YYYY-MM-DD, blank for no limit)",
+        default="",
+        show_default=False,
+    )
+    start_date_val = date.fromisoformat(start_date_str) if start_date_str else None
+    end_date_val = date.fromisoformat(end_date_str) if end_date_str else None
+
     days_ahead = click.prompt("Days in advance reservations open", type=int, default=14)
     drop_str = click.prompt("Drop time (HH:MM:SS)", default="00:00:00")
     drop_tz = click.prompt("Drop timezone", default="America/New_York")
     max_retries = click.prompt("Max retry days", type=int, default=30)
+    snipe_rate = click.prompt("Snipe request rate (requests/sec, 1-50)", type=float, default=10.0)
+    snipe_timeout = click.prompt("Snipe timeout in seconds (how long to keep trying after drop)", type=int, default=300)
 
     t = ReservationTarget(
         id=target_id,
@@ -185,10 +275,14 @@ def target_add(ctx, from_file):
         time_window=time_window,
         preferred_times=preferred_times,
         preferred_seating=seating or None,
+        start_date=start_date_val,
+        end_date=end_date_val,
         days_in_advance=days_ahead,
         drop_time=time.fromisoformat(drop_str),
         drop_timezone=drop_tz,
         max_retry_days=max_retries,
+        snipe_rate=snipe_rate,
+        snipe_timeout=snipe_timeout,
     )
     path = save_target(t, config_dir)
     click.echo(f"\nTarget '{t.id}' saved to {path}")
@@ -244,7 +338,8 @@ def venue_search(ctx, query):
         try:
             results = await client.search_venues(query)
             if not results:
-                click.echo("No results found.")
+                click.echo("No results found via API.")
+                _show_manual_venue_instructions()
                 return
             click.echo(f"\nFound {len(results)} result(s):\n")
             for r in results:
@@ -253,10 +348,26 @@ def venue_search(ctx, query):
                 click.echo(f"  Location: {r['location']}")
                 click.echo(f"  Cuisine: {', '.join(r['cuisine']) if r['cuisine'] else 'N/A'}")
                 click.echo()
+        except Exception:
+            click.echo("Venue search API is unavailable.")
+            _show_manual_venue_instructions()
         finally:
             await client.close()
 
     asyncio.run(_search())
+
+
+def _show_manual_venue_instructions():
+    """Show instructions for finding venue ID manually."""
+    click.echo("\nYou can find the venue ID manually from the Resy website:\n")
+    click.echo("  1. Go to resy.com and search for the restaurant")
+    click.echo("  2. Click on the restaurant page")
+    click.echo("  3. Open Dev Tools (F12) > Network tab")
+    click.echo("  4. Look for a request to api.resy.com/4/find")
+    click.echo("  5. In the request payload/params, you'll see 'venue_id=XXXXX'")
+    click.echo("     That number is the venue ID.\n")
+    click.echo("  OR: Look at the URL — some pages show it as:")
+    click.echo("     resy.com/cities/ny/venue-name?venue_id=XXXXX\n")
 
 
 # ── Snipe commands ──

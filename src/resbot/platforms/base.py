@@ -44,24 +44,32 @@ class ReservationPlatform(ABC):
         """Close the client session."""
 
     async def snipe(self, target: ReservationTarget, day: date) -> BookingResult:
-        """Full snipe pipeline: find → rank → book. Override for platform-specific optimizations."""
+        """Full snipe pipeline with configurable rate and timeout."""
+        import asyncio
+        import time as _time
+
         from resbot.engine import rank_slots
 
-        slots = await self.find_slots(target.venue_id, day, target.party_size)
-        ranked = rank_slots(slots, target)
-        if not ranked:
-            return BookingResult(
-                target_id=target.id, success=False, error="No matching slots found"
-            )
-        for slot in ranked:
-            try:
-                token = await self.get_booking_token(slot, day, target.party_size)
-                result = await self.book(token)
-                if result.success:
-                    result.target_id = target.id
-                    return result
-            except Exception as e:
+        sleep_interval = 1.0 / target.snipe_rate
+        deadline = _time.monotonic() + target.snipe_timeout
+
+        while _time.monotonic() < deadline:
+            slots = await self.find_slots(target.venue_id, day, target.party_size)
+            ranked = rank_slots(slots, target)
+            if not ranked:
+                await asyncio.sleep(sleep_interval)
                 continue
+            for slot in ranked:
+                try:
+                    token = await self.get_booking_token(slot, day, target.party_size)
+                    result = await self.book(token)
+                    if result.success:
+                        result.target_id = target.id
+                        return result
+                except Exception:
+                    continue
+            await asyncio.sleep(sleep_interval)
+
         return BookingResult(
-            target_id=target.id, success=False, error="All slot booking attempts failed"
+            target_id=target.id, success=False, error="Snipe timed out"
         )

@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>resbot Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e1e4e8; padding: 20px; }
+        h1 { font-size: 1.5rem; margin-bottom: 16px; color: #58a6ff; }
+        h2 { font-size: 1.2rem; margin-bottom: 12px; color: #c9d1d9; }
+
+        /* Tabs */
+        .tabs { display: flex; gap: 0; margin-bottom: 20px; border-bottom: 1px solid #30363d; }
+        .tab { padding: 10px 20px; cursor: pointer; color: #8b949e; border-bottom: 2px solid transparent; transition: all 0.2s; }
+        .tab:hover { color: #c9d1d9; }
+        .tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* Cards */
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); gap: 16px; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .card-title { font-size: 1.1rem; font-weight: 600; }
+        .badge { padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
+        .badge-active { background: #1f6feb33; color: #58a6ff; }
+        .badge-success { background: #23863533; color: #3fb950; }
+        .badge-failed { background: #da363333; color: #f85149; }
+        .badge-disabled { background: #30363d; color: #8b949e; }
+        .info { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 0.85rem; }
+        .info dt { color: #8b949e; }
+        .info dd { color: #c9d1d9; }
+
+        /* Forms */
+        .form-section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 16px; max-width: 600px; }
+        .form-row { margin-bottom: 12px; }
+        .form-row label { display: block; font-size: 0.85rem; color: #8b949e; margin-bottom: 4px; }
+        .form-row input, .form-row select { width: 100%; padding: 8px 10px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; font-size: 0.9rem; }
+        .form-row input:focus, .form-row select:focus { outline: none; border-color: #58a6ff; }
+        .form-row-inline { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+        /* Buttons */
+        .btn { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+        .btn:hover { background: #30363d; }
+        .btn-primary { background: #238636; border-color: #238636; color: #fff; }
+        .btn-primary:hover { background: #2ea043; }
+        .btn-danger { background: #da3633; border-color: #da3633; color: #fff; }
+        .btn-danger:hover { background: #f85149; }
+        .btn-row { display: flex; gap: 8px; margin-top: 16px; }
+
+        /* Target list */
+        .target-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; margin-bottom: 8px; }
+        .target-info { flex: 1; }
+        .target-info strong { color: #c9d1d9; }
+        .target-info span { color: #8b949e; font-size: 0.85rem; margin-left: 12px; }
+        .target-actions { display: flex; gap: 6px; }
+
+        /* Log */
+        .log { margin-top: 20px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; max-height: 300px; overflow-y: auto; }
+        .log-entry { font-family: monospace; font-size: 0.8rem; padding: 2px 0; color: #8b949e; }
+        .log-entry.success { color: #3fb950; }
+        .log-entry.error { color: #f85149; }
+
+        .empty { text-align: center; padding: 40px; color: #8b949e; }
+        .msg { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 0.85rem; }
+        .msg-ok { background: #23863533; color: #3fb950; }
+        .msg-err { background: #da363333; color: #f85149; }
+    </style>
+</head>
+<body>
+    <h1>resbot</h1>
+
+    <div class="tabs">
+        <div class="tab active" onclick="showTab('dashboard')">Dashboard</div>
+        <div class="tab" onclick="showTab('profile')">Profile</div>
+        <div class="tab" onclick="showTab('targets')">Targets</div>
+    </div>
+
+    <!-- Dashboard Tab -->
+    <div id="tab-dashboard" class="tab-content active">
+        {{CARDS}}
+        <div class="log" id="log">
+            <div class="log-entry">Listening for events...</div>
+        </div>
+    </div>
+
+    <!-- Profile Tab -->
+    <div id="tab-profile" class="tab-content">
+        <h2>User Profile</h2>
+        <div id="profile-msg"></div>
+        <div class="form-section">
+            <div class="form-row-inline">
+                <div class="form-row"><label>Name</label><input id="p-name" /></div>
+                <div class="form-row"><label>Phone</label><input id="p-phone" /></div>
+            </div>
+            <div class="form-row"><label>Email</label><input id="p-email" type="email" /></div>
+
+            <h2 style="margin-top:16px;">Resy Credentials</h2>
+            <div class="form-row-inline">
+                <div class="form-row"><label>Resy Email</label><input id="p-resy-email" /></div>
+                <div class="form-row"><label>Resy Password</label><input id="p-resy-password" type="password" /></div>
+            </div>
+            <div class="form-row"><label>API Key</label><input id="p-resy-api-key" /></div>
+            <div class="form-row"><label>Auth Token</label><input id="p-resy-auth-token" /></div>
+            <div class="form-row"><label>Payment Method ID</label><input id="p-resy-payment" /></div>
+
+            <h2 style="margin-top:16px;">OpenTable Credentials</h2>
+            <div class="form-row-inline">
+                <div class="form-row"><label>OpenTable Email</label><input id="p-ot-email" /></div>
+                <div class="form-row"><label>OpenTable Password</label><input id="p-ot-password" type="password" /></div>
+            </div>
+
+            <div class="btn-row">
+                <button class="btn btn-primary" onclick="saveProfile()">Save Profile</button>
+                <button class="btn" onclick="testResyLogin()">Test Resy Login</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Targets Tab -->
+    <div id="tab-targets" class="tab-content">
+        <h2>Reservation Targets</h2>
+        <div id="targets-msg"></div>
+        <div id="targets-list"></div>
+
+        <h2 style="margin-top:20px;">Add / Edit Target</h2>
+        <div class="form-section">
+            <div class="form-row-inline">
+                <div class="form-row"><label>Target ID</label><input id="t-id" placeholder="e.g. carbone-dinner" /></div>
+                <div class="form-row"><label>Platform</label>
+                    <select id="t-platform"><option value="resy">Resy</option><option value="opentable">OpenTable</option></select>
+                </div>
+            </div>
+            <div class="form-row-inline">
+                <div class="form-row"><label>Restaurant Name</label><input id="t-venue-name" /></div>
+                <div class="form-row"><label>Venue ID</label><input id="t-venue-id" /></div>
+            </div>
+            <div class="form-row-inline">
+                <div class="form-row"><label>Party Size</label><input id="t-party" type="number" value="2" min="1" max="20" /></div>
+                <div class="form-row"><label>Meal Type</label>
+                    <select id="t-meal"><option value="breakfast">Breakfast (9 AM)</option><option value="brunch">Brunch (12 PM)</option><option value="lunch">Lunch (1 PM)</option><option value="dinner" selected>Dinner (7 PM)</option></select>
+                </div>
+            </div>
+            <div class="form-row-inline">
+                <div class="form-row"><label>Earliest Time</label><input id="t-earliest" type="time" value="17:30" /></div>
+                <div class="form-row"><label>Latest Time</label><input id="t-latest" type="time" value="21:00" /></div>
+            </div>
+            <div class="form-row"><label>Preferred Times (comma-separated, e.g. 19:00,19:30)</label><input id="t-preferred" /></div>
+            <div class="form-row"><label>Preferred Seating (optional)</label><input id="t-seating" placeholder="e.g. Dining Room" /></div>
+            <div class="form-row-inline">
+                <div class="form-row"><label>Start Date (optional)</label><input id="t-start-date" type="date" /></div>
+                <div class="form-row"><label>End Date (optional)</label><input id="t-end-date" type="date" /></div>
+            </div>
+            <div class="form-row-inline">
+                <div class="form-row"><label>Days in Advance</label><input id="t-days" type="number" value="14" min="1" /></div>
+                <div class="form-row"><label>Max Retry Days</label><input id="t-retries" type="number" value="30" min="1" /></div>
+            </div>
+            <div class="form-row-inline">
+                <div class="form-row"><label>Drop Time (HH:MM:SS)</label><input id="t-drop" value="00:00:00" /></div>
+                <div class="form-row"><label>Drop Timezone</label><input id="t-tz" value="America/New_York" /></div>
+            </div>
+            <div class="form-row-inline">
+                <div class="form-row"><label>Snipe Rate (requests/sec)</label><input id="t-rate" type="number" value="10" min="1" max="50" step="1" /></div>
+                <div class="form-row"><label>Snipe Timeout (seconds)</label><input id="t-timeout" type="number" value="300" min="10" /></div>
+            </div>
+            <div class="btn-row">
+                <button class="btn btn-primary" onclick="saveTarget()">Save Target</button>
+                <button class="btn" onclick="clearTargetForm()">Clear Form</button>
+            </div>
+        </div>
+    </div>
+
+<script>
+// ── Tabs ──
+function showTab(name) {
+    document.querySelectorAll('.tab-content').forEach(function(el) { el.classList.remove('active'); });
+    document.querySelectorAll('.tab').forEach(function(el) { el.classList.remove('active'); });
+    document.getElementById('tab-' + name).classList.add('active');
+    document.querySelectorAll('.tab')[['dashboard','profile','targets'].indexOf(name)].classList.add('active');
+    if (name === 'profile') loadProfile();
+    if (name === 'targets') loadTargets();
+}
+
+function showMsg(elId, text, ok) {
+    var el = document.getElementById(elId);
+    el.innerHTML = '<div class="msg ' + (ok ? 'msg-ok' : 'msg-err') + '">' + text + '</div>';
+    setTimeout(function() { el.innerHTML = ''; }, 4000);
+}
+
+// ── Profile ──
+function loadProfile() {
+    fetch('/api/profile').then(function(r) { return r.json(); }).then(function(d) {
+        if (d.error) return;
+        document.getElementById('p-name').value = d.name || '';
+        document.getElementById('p-phone').value = d.phone || '';
+        document.getElementById('p-email').value = d.email || '';
+        document.getElementById('p-resy-email').value = d.resy_email || '';
+        document.getElementById('p-resy-password').value = d.resy_password || '';
+        document.getElementById('p-resy-api-key').value = d.resy_api_key || '';
+        document.getElementById('p-resy-auth-token').value = d.resy_auth_token || '';
+        document.getElementById('p-resy-payment').value = d.resy_payment_method_id || '';
+        document.getElementById('p-ot-email').value = d.opentable_email || '';
+        document.getElementById('p-ot-password').value = d.opentable_password || '';
+    });
+}
+
+function saveProfile() {
+    var data = {
+        name: document.getElementById('p-name').value,
+        phone: document.getElementById('p-phone').value,
+        email: document.getElementById('p-email').value,
+        resy_email: document.getElementById('p-resy-email').value,
+        resy_password: document.getElementById('p-resy-password').value,
+        resy_api_key: document.getElementById('p-resy-api-key').value,
+        resy_auth_token: document.getElementById('p-resy-auth-token').value,
+        resy_payment_method_id: document.getElementById('p-resy-payment').value || null,
+        opentable_email: document.getElementById('p-ot-email').value,
+        opentable_password: document.getElementById('p-ot-password').value
+    };
+    fetch('/api/profile', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) { showMsg('profile-msg', d.error || 'Profile saved!', !d.error); });
+}
+
+function testResyLogin() {
+    var email = document.getElementById('p-resy-email').value;
+    var pw = document.getElementById('p-resy-password').value;
+    showMsg('profile-msg', 'Testing login...', true);
+    fetch('/api/profile/login', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({email: email, password: pw}) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (d.error) { showMsg('profile-msg', 'Login failed: ' + d.error, false); }
+            else {
+                showMsg('profile-msg', 'Login OK! Token and payment method updated.', true);
+                document.getElementById('p-resy-api-key').value = d.api_key || '';
+                document.getElementById('p-resy-auth-token').value = d.auth_token || '';
+                if (d.payment_method_id) document.getElementById('p-resy-payment').value = d.payment_method_id;
+            }
+        });
+}
+
+// ── Targets ──
+function loadTargets() {
+    fetch('/api/targets').then(function(r) { return r.json(); }).then(function(targets) {
+        var list = document.getElementById('targets-list');
+        if (!targets.length) { list.innerHTML = '<div class="empty">No targets yet.</div>'; return; }
+        var html = '';
+        targets.forEach(function(t) {
+            html += '<div class="target-item">' +
+                '<div class="target-info"><strong>' + t.venue_name + '</strong>' +
+                '<span>' + t.platform + ' | ' + t.meal_type + ' | party of ' + t.party_size +
+                ' | ' + t.snipe_rate + ' req/s | ' + t.snipe_timeout + 's timeout' +
+                (t.start_date ? ' | from ' + t.start_date : '') +
+                (t.end_date ? ' | until ' + t.end_date : '') + '</span></div>' +
+                '<div class="target-actions">' +
+                '<button class="btn" onclick="editTarget(\'' + t.id + '\')">Edit</button>' +
+                '<button class="btn btn-danger" onclick="deleteTarget(\'' + t.id + '\')">Delete</button>' +
+                '</div></div>';
+        });
+        list.innerHTML = html;
+    });
+}
+
+function saveTarget() {
+    var preferred = document.getElementById('t-preferred').value;
+    var prefList = preferred ? preferred.split(',').map(function(s) { return s.trim(); }) : [];
+    var data = {
+        id: document.getElementById('t-id').value,
+        platform: document.getElementById('t-platform').value,
+        venue_name: document.getElementById('t-venue-name').value,
+        venue_id: document.getElementById('t-venue-id').value,
+        party_size: parseInt(document.getElementById('t-party').value),
+        meal_type: document.getElementById('t-meal').value,
+        time_window: {
+            earliest: document.getElementById('t-earliest').value,
+            latest: document.getElementById('t-latest').value
+        },
+        preferred_times: prefList,
+        preferred_seating: document.getElementById('t-seating').value || null,
+        start_date: document.getElementById('t-start-date').value || null,
+        end_date: document.getElementById('t-end-date').value || null,
+        days_in_advance: parseInt(document.getElementById('t-days').value),
+        max_retry_days: parseInt(document.getElementById('t-retries').value),
+        drop_time: document.getElementById('t-drop').value,
+        drop_timezone: document.getElementById('t-tz').value,
+        snipe_rate: parseFloat(document.getElementById('t-rate').value),
+        snipe_timeout: parseInt(document.getElementById('t-timeout').value),
+        enabled: true
+    };
+    var method = document.getElementById('t-id').dataset.editing ? 'PUT' : 'POST';
+    var url = method === 'PUT' ? '/api/targets/' + data.id : '/api/targets';
+    fetch(url, { method: method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            showMsg('targets-msg', d.error || 'Target saved!', !d.error);
+            if (!d.error) { loadTargets(); clearTargetForm(); }
+        });
+}
+
+function editTarget(id) {
+    fetch('/api/targets').then(function(r) { return r.json(); }).then(function(targets) {
+        var t = targets.find(function(x) { return x.id === id; });
+        if (!t) return;
+        document.getElementById('t-id').value = t.id;
+        document.getElementById('t-id').dataset.editing = 'true';
+        document.getElementById('t-platform').value = t.platform;
+        document.getElementById('t-venue-name').value = t.venue_name;
+        document.getElementById('t-venue-id').value = t.venue_id;
+        document.getElementById('t-party').value = t.party_size;
+        document.getElementById('t-meal').value = t.meal_type;
+        if (t.time_window) {
+            document.getElementById('t-earliest').value = t.time_window.earliest || '';
+            document.getElementById('t-latest').value = t.time_window.latest || '';
+        }
+        document.getElementById('t-preferred').value = (t.preferred_times || []).join(', ');
+        document.getElementById('t-seating').value = t.preferred_seating || '';
+        document.getElementById('t-start-date').value = t.start_date || '';
+        document.getElementById('t-end-date').value = t.end_date || '';
+        document.getElementById('t-days').value = t.days_in_advance;
+        document.getElementById('t-retries').value = t.max_retry_days;
+        document.getElementById('t-drop').value = t.drop_time;
+        document.getElementById('t-tz').value = t.drop_timezone;
+        document.getElementById('t-rate').value = t.snipe_rate;
+        document.getElementById('t-timeout').value = t.snipe_timeout;
+        window.scrollTo(0, document.getElementById('t-id').offsetTop - 80);
+    });
+}
+
+function deleteTarget(id) {
+    if (!confirm('Delete target "' + id + '"?')) return;
+    fetch('/api/targets/' + id, { method: 'DELETE' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) { showMsg('targets-msg', d.error || 'Deleted.', !d.error); loadTargets(); });
+}
+
+function clearTargetForm() {
+    ['t-id','t-venue-name','t-venue-id','t-preferred','t-seating','t-start-date','t-end-date'].forEach(function(id) { document.getElementById(id).value = ''; });
+    document.getElementById('t-id').dataset.editing = '';
+    document.getElementById('t-party').value = '2';
+    document.getElementById('t-meal').value = 'dinner';
+    document.getElementById('t-earliest').value = '17:30';
+    document.getElementById('t-latest').value = '21:00';
+    document.getElementById('t-days').value = '14';
+    document.getElementById('t-retries').value = '30';
+    document.getElementById('t-drop').value = '00:00:00';
+    document.getElementById('t-tz').value = 'America/New_York';
+    document.getElementById('t-rate').value = '10';
+    document.getElementById('t-timeout').value = '300';
+}
+
+// ── Dashboard events ──
+var log = document.getElementById('log');
+function addLog(msg, cls) {
+    var div = document.createElement('div');
+    div.className = 'log-entry ' + (cls || '');
+    div.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+    log.prepend(div);
+    if (log.children.length > 200) log.removeChild(log.lastChild);
+}
+
+function toggleTarget(id) {
+    fetch('/api/targets/' + id + '/toggle', { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) { addLog('Target ' + id + ' ' + (d.enabled ? 'enabled' : 'disabled')); setTimeout(function() { location.reload(); }, 500); });
+}
+
+var evtSource = new EventSource('/api/events');
+evtSource.addEventListener('result', function(e) {
+    var data = JSON.parse(e.data);
+    if (data.success) addLog('BOOKED: ' + data.target_id + ' - ' + (data.confirmation_token || ''), 'success');
+    else addLog('FAILED: ' + data.target_id + ' - ' + (data.error || ''), 'error');
+});
+evtSource.addEventListener('ping', function() {});
+evtSource.onerror = function() { addLog('Connection lost, reconnecting...', 'error'); };
+</script>
+</body>
+</html>

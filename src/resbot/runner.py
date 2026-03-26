@@ -86,6 +86,17 @@ async def run_single_snipe(target_id: str, config_dir=None) -> BookingResult:
             tz = ZoneInfo(target.drop_timezone)
             target_date = (datetime.now(tz) + timedelta(days=target.days_in_advance)).date()
 
+        # Clamp to start_date / end_date
+        if target.start_date and target_date < target.start_date:
+            target_date = target.start_date
+        if target.end_date and target_date > target.end_date:
+            return BookingResult(
+                target_id=target.id,
+                success=False,
+                error=f"Computed date {target_date} is past end_date {target.end_date}",
+            )
+
+        logger.info("Sniping %s for date %s", target.venue_name, target_date.isoformat())
         result = await client.snipe(target, target_date)
         return result
     finally:
@@ -117,6 +128,16 @@ async def run_all_snipes(config_dir=None) -> list[BookingResult]:
             else:
                 tz = ZoneInfo(target.drop_timezone)
                 target_date = (datetime.now(tz) + timedelta(days=target.days_in_advance)).date()
+
+            if target.start_date and target_date < target.start_date:
+                target_date = target.start_date
+            if target.end_date and target_date > target.end_date:
+                return BookingResult(
+                    target_id=target.id,
+                    success=False,
+                    error=f"Computed date {target_date} is past end_date {target.end_date}",
+                )
+
             return await client.snipe(target, target_date)
         finally:
             await client.close()

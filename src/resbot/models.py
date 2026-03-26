@@ -52,6 +52,8 @@ class UserProfile(BaseModel):
     email: str
     resy_api_key: str = ""
     resy_auth_token: str = ""
+    resy_email: str = ""
+    resy_password: str = ""
     resy_payment_method_id: str | None = None
     opentable_email: str = ""
     opentable_password: str = ""
@@ -70,10 +72,14 @@ class ReservationTarget(BaseModel):
     preferred_times: list[time] = Field(default_factory=list)
     preferred_seating: str | None = None
     target_date: date | None = None
+    start_date: date | None = None
+    end_date: date | None = None
     days_in_advance: int = Field(default=14, ge=1)
     drop_time: time = Field(default_factory=lambda: time(0, 0, 0))
     drop_timezone: str = "America/New_York"
     max_retry_days: int = Field(default=30, ge=1)
+    snipe_rate: float = Field(default=10.0, ge=1.0, le=50.0)
+    snipe_timeout: int = Field(default=300, ge=10)
     enabled: bool = True
 
     @property
