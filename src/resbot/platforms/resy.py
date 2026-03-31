@@ -141,12 +141,28 @@ class ResyClient(ReservationPlatform):
     async def find_slots(
         self, venue_id: str, day: date, party_size: int
     ) -> tuple[list[Slot], dict]:
-        """Find available slots. Returns (slots, raw_response_dict)."""
-        # Validate date is not in the past
+        """Find available slots. Returns (slots, raw_response_dict).
+
+        Tries /4/find first. If it returns 500 (some venues don't support it),
+        falls back to /4/venue/calendar to check availability.
+        """
         from datetime import date as _date
         if day < _date.today():
             _print(f"[find] WARNING: date {day} is in the past! Resy will reject this.")
 
+        # Try /4/find first
+        slots, data = await self._find_via_find(venue_id, day, party_size)
+        if slots or (data and data.get("results", {}).get("venues")):
+            return slots, data
+
+        # Fall back to /4/venue/calendar
+        _print("[find] /4/find failed, trying /4/venue/calendar...")
+        return await self._find_via_calendar(venue_id, day, party_size)
+
+    async def _find_via_find(
+        self, venue_id: str, day: date, party_size: int
+    ) -> tuple[list[Slot], dict]:
+        """Try the standard /4/find endpoint."""
         try:
             resp = await self._session.get(
                 "/4/find",
@@ -160,35 +176,108 @@ class ResyClient(ReservationPlatform):
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            _print(f"[find] API error {e.response.status_code} for venue={venue_id} date={day} party={party_size}")
-            _print(f"[find] Response: {e.response.text[:500]}")
-            if e.response.status_code == 500:
-                _print("[find] 500 errors usually mean: expired auth token, invalid venue ID, or past date")
+            _print(f"[find] /4/find returned {e.response.status_code} for venue={venue_id}")
             return [], {}
 
         data = orjson.loads(resp.content)
-
-        slots = []
-
-        # Try primary path: results.venues[].slots[]
-        venues = data.get("results", {}).get("venues", [])
-
-        for venue in venues:
-            venue_slots = venue.get("slots", [])
-            for slot_data in venue_slots:
-                slot = self._parse_slot(slot_data, day)
-                if slot:
-                    slots.append(slot)
-
-        # If primary path found nothing, try alternate response structures
-        if not slots:
-            raw_slots = data.get("results", {}).get("slots", [])
-            for slot_data in raw_slots:
-                slot = self._parse_slot(slot_data, day)
-                if slot:
-                    slots.append(slot)
-
+        slots = self._extract_slots_from_find(data, day)
         return slots, data
+
+    async def _find_via_calendar(
+        self, venue_id: str, day: date, party_size: int
+    ) -> tuple[list[Slot], dict]:
+        """Try /4/venue/calendar endpoint, then fetch slots for available dates."""
+        try:
+            resp = await self._session.get(
+                "/4/venue/calendar",
+                params={
+                    "venue_id": venue_id,
+                    "num_seats": party_size,
+                    "start_date": day.isoformat(),
+                    "end_date": day.isoformat(),
+                },
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            _print(f"[find] /4/venue/calendar returned {e.response.status_code}")
+            _print(f"[find] Response: {e.response.text[:500]}")
+            return [], {}
+
+        data = orjson.loads(resp.content)
+        _print(f"[find] Calendar response keys: {list(data.keys())}")
+
+        scheduled = data.get("scheduled", [])
+        if not scheduled:
+            _print(f"[find] No scheduled dates in calendar response")
+            preview = orjson.dumps(data).decode()[:600]
+            _print(f"[find] Preview: {preview}")
+            return [], data
+
+        # Find our target date
+        day_str = day.isoformat()
+        target_entry = None
+        for entry in scheduled:
+            if entry.get("date") == day_str:
+                target_entry = entry
+                break
+
+        if not target_entry:
+            _print(f"[find] Date {day} not in calendar. Available dates:")
+            for entry in scheduled[:10]:
+                inv = entry.get("inventory", {})
+                status = inv.get("reservation", "unknown")
+                _print(f"  {entry.get('date')}: {status}")
+            return [], data
+
+        inv = target_entry.get("inventory", {})
+        res_status = inv.get("reservation", "unknown")
+        if res_status != "available":
+            _print(f"[find] Date {day} reservation status: {res_status}")
+            return [], data
+
+        _print(f"[find] Date {day} is available! Fetching slot details...")
+
+        # Date is available — use /4/find with this specific date
+        # (some venues support /4/find only for dates confirmed by calendar)
+        try:
+            resp2 = await self._session.get(
+                "/4/find",
+                params={
+                    "venue_id": venue_id,
+                    "day": day_str,
+                    "party_size": party_size,
+                    "lat": 0,
+                    "long": 0,
+                },
+            )
+            resp2.raise_for_status()
+            find_data = orjson.loads(resp2.content)
+            slots = self._extract_slots_from_find(find_data, day)
+            if slots:
+                _print(f"[find] Got {len(slots)} slot(s) via calendar→find")
+                return slots, find_data
+        except httpx.HTTPStatusError:
+            pass
+
+        _print("[find] Calendar confirms availability but can't fetch individual slots")
+        _print("[find] This venue may require a different booking flow")
+        return [], data
+
+    def _extract_slots_from_find(self, data: dict, day: date) -> list[Slot]:
+        """Extract slots from a /4/find response."""
+        slots = []
+        for venue in data.get("results", {}).get("venues", []):
+            for slot_data in venue.get("slots", []):
+                slot = self._parse_slot(slot_data, day)
+                if slot:
+                    slots.append(slot)
+        # Alternate path
+        if not slots:
+            for slot_data in data.get("results", {}).get("slots", []):
+                slot = self._parse_slot(slot_data, day)
+                if slot:
+                    slots.append(slot)
+        return slots
 
     @staticmethod
     def _parse_slot(slot_data: dict, day: date) -> Slot | None:
