@@ -47,7 +47,12 @@ async def main():
         "Authorization": f'ResyAPI api_key="{profile.resy_api_key}"',
         "X-Resy-Auth-Token": profile.resy_auth_token,
         "Accept": "application/json",
+        "Origin": "https://resy.com",
+        "Referer": "https://resy.com/",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     }
+
+    print(f"\n    Using API key: {profile.resy_api_key}")
 
     async with httpx.AsyncClient(
         base_url="https://api.resy.com",
