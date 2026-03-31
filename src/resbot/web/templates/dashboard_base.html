@@ -349,6 +349,53 @@ function clearTargetForm() {
     document.getElementById('t-timeout').value = '300';
 }
 
+// ── Mode actions (grab / snipe) ──
+function runAction(targetId, mode) {
+    var dateEl = document.getElementById('action-date-' + targetId);
+    var statusEl = document.getElementById('action-status-' + targetId);
+    var btnEl = document.getElementById('btn-' + mode + '-' + targetId);
+    var dateVal = dateEl ? dateEl.value : '';
+
+    if (!dateVal) { statusEl.innerHTML = '<span style="color:#f85149;">Pick a date first.</span>'; return; }
+
+    btnEl.disabled = true;
+    btnEl.textContent = mode === 'grab' ? 'Grabbing...' : 'Sniping...';
+    statusEl.innerHTML = '<span style="color:#58a6ff;">Running ' + mode + '...</span>';
+
+    fetch('/api/targets/' + targetId + '/' + mode, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({date: dateVal})
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        if (d.error) {
+            statusEl.innerHTML = '<span style="color:#f85149;">' + d.error + '</span>';
+            btnEl.disabled = false;
+            btnEl.textContent = mode === 'grab' ? 'Grab Now' : 'Snipe';
+        } else {
+            statusEl.innerHTML = '<span style="color:#58a6ff;">' + mode.charAt(0).toUpperCase() + mode.slice(1) + ' started. Check log below.</span>';
+            // Re-enable button after a delay (grab is quick, snipe can be long)
+            var delay = mode === 'grab' ? 10000 : 60000;
+            setTimeout(function() {
+                btnEl.disabled = false;
+                btnEl.textContent = mode === 'grab' ? 'Grab Now' : 'Snipe';
+            }, delay);
+        }
+    })
+    .catch(function(err) {
+        statusEl.innerHTML = '<span style="color:#f85149;">Network error</span>';
+        btnEl.disabled = false;
+        btnEl.textContent = mode === 'grab' ? 'Grab Now' : 'Snipe';
+    });
+}
+
+function stopAction(targetId) {
+    fetch('/api/targets/' + targetId + '/stop', { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) { addLog('Stopped actions for ' + targetId + ': ' + JSON.stringify(d)); });
+}
+
 // ── Dashboard events ──
 var log = document.getElementById('log');
 function addLog(msg, cls) {
