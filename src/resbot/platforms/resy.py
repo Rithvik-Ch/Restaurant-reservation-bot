@@ -187,14 +187,18 @@ class ResyClient(ReservationPlatform):
         self, venue_id: str, day: date, party_size: int
     ) -> tuple[list[Slot], dict]:
         """Try /4/venue/calendar endpoint, then fetch slots for available dates."""
+        from datetime import timedelta
+        # Calendar API needs a wide date range (Resy website uses ~1 year)
+        range_start = day
+        range_end = day + timedelta(days=365)
         try:
             resp = await self._session.get(
                 "/4/venue/calendar",
                 params={
                     "venue_id": venue_id,
                     "num_seats": party_size,
-                    "start_date": day.isoformat(),
-                    "end_date": day.isoformat(),
+                    "start_date": range_start.isoformat(),
+                    "end_date": range_end.isoformat(),
                 },
             )
             resp.raise_for_status()
