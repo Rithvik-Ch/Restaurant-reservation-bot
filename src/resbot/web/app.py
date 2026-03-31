@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -16,6 +16,7 @@ from sse_starlette.sse import EventSourceResponse
 from resbot.config import (
     ensure_config_dir,
     load_profile,
+    load_target,
     load_targets,
     remove_target,
     save_profile,
@@ -66,6 +67,7 @@ def _render_dashboard(targets, statuses) -> str:
                 result_text = 'Success' if status.last_result.success else (status.last_result.error or 'Failed')
                 status_rows += f"\n            <dt>Last Result</dt><dd>{result_text}</dd>"
         btn_text = 'Disable' if t.enabled else 'Enable'
+        tomorrow = (datetime.now().date() + timedelta(days=1)).isoformat()
         cards.append(f"""
         <div class="card" id="card-{t.id}">
             <div class="card-header">
@@ -79,13 +81,23 @@ def _render_dashboard(targets, statuses) -> str:
                 <dt>Window</dt><dd>{window_str}</dd>
                 <dt>Drop</dt><dd>{t.drop_time.strftime('%H:%M:%S')} {t.drop_timezone}</dd>
                 <dt>Advance</dt><dd>{t.days_in_advance} days</dd>
-                <dt>Dates</dt><dd>{t.start_date or 'auto'} → {t.end_date or 'no limit'}</dd>
+                <dt>Dates</dt><dd>{t.start_date or 'auto'} &rarr; {t.end_date or 'no limit'}</dd>
                 <dt>Rate</dt><dd>{t.snipe_rate} req/sec</dd>
                 <dt>Timeout</dt><dd>{t.snipe_timeout}s</dd>
                 {status_rows}
             </dl>
-            <div style="margin-top: 12px;">
-                <button class="btn" onclick="toggleTarget('{t.id}')">{btn_text}</button>
+            <div class="mode-section" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #30363d;">
+                <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 8px;">
+                    <label style="font-size: 0.8rem; color: #8b949e;">Date:</label>
+                    <input type="date" id="action-date-{t.id}" value="{tomorrow}"
+                           style="padding: 4px 8px; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; font-size: 0.8rem;" />
+                </div>
+                <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                    <button class="btn btn-primary" onclick="runAction('{t.id}', 'grab')" id="btn-grab-{t.id}" title="Immediately find and book an open slot">Grab Now</button>
+                    <button class="btn" style="background:#1f6feb; border-color:#1f6feb; color:#fff;" onclick="runAction('{t.id}', 'snipe')" id="btn-snipe-{t.id}" title="Burst-loop at drop time to snag a slot">Snipe</button>
+                    <button class="btn" onclick="toggleTarget('{t.id}')">{btn_text}</button>
+                </div>
+                <div id="action-status-{t.id}" style="margin-top: 8px; font-size: 0.8rem;"></div>
             </div>
         </div>""")
     return '<div class="grid">' + "\n".join(cards) + '</div>'
@@ -259,6 +271,121 @@ def create_app(config_dir=None) -> FastAPI:
                     status.enabled = True
                     break
         return {"target_id": target_id, "enabled": status.enabled}
+
+    # ── Action API (grab / snipe) ──
+
+    _running_actions: dict[str, asyncio.Task] = {}
+
+    @app.post("/api/targets/{target_id}/grab")
+    async def grab_target(target_id: str, request: Request):
+        """Immediately find and book an open slot."""
+        data = await request.json()
+        grab_date_str = data.get("date")
+        if not grab_date_str:
+            return JSONResponse(status_code=400, content={"error": "date is required"})
+        try:
+            grab_date = date.fromisoformat(grab_date_str)
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "Invalid date format"})
+        if grab_date < date.today():
+            return JSONResponse(status_code=400, content={"error": "Date is in the past"})
+
+        action_key = f"grab-{target_id}"
+        if action_key in _running_actions and not _running_actions[action_key].done():
+            return JSONResponse(status_code=409, content={"error": "Grab already running for this target"})
+
+        async def _do_grab():
+            try:
+                from resbot.engine import rank_slots
+                from resbot.platforms.resy import ResyClient
+
+                profile = load_profile(config_dir)
+                target = load_target(target_id, config_dir)
+                client = ResyClient(profile)
+                try:
+                    await client.warmup()
+                    slots, _raw = await client.find_slots(target.venue_id, grab_date, target.party_size)
+                    if not slots:
+                        result = BookingResult(target_id=target_id, success=False, error="No slots found")
+                        event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
+                        return
+                    ranked = rank_slots(slots, target)
+                    for slot in ranked[:3]:
+                        try:
+                            token = await client.get_booking_token(slot, grab_date, target.party_size)
+                            result = await client.book(token)
+                            if result.success:
+                                result.target_id = target_id
+                                event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
+                                return
+                        except Exception:
+                            continue
+                    result = BookingResult(target_id=target_id, success=False, error="Could not book any slot")
+                    event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
+                finally:
+                    await client.close()
+            except Exception as e:
+                result = BookingResult(target_id=target_id, success=False, error=str(e))
+                event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
+
+        task = asyncio.create_task(_do_grab())
+        _running_actions[action_key] = task
+        return {"status": "started", "action": "grab", "target_id": target_id, "date": grab_date_str}
+
+    @app.post("/api/targets/{target_id}/snipe")
+    async def snipe_target(target_id: str, request: Request):
+        """Start a snipe burst loop for a target."""
+        data = await request.json()
+        snipe_date_str = data.get("date")
+
+        action_key = f"snipe-{target_id}"
+        if action_key in _running_actions and not _running_actions[action_key].done():
+            return JSONResponse(status_code=409, content={"error": "Snipe already running for this target"})
+
+        async def _do_snipe():
+            try:
+                from resbot.platforms.resy import ResyClient
+                from resbot.runner import _compute_snipe_date
+
+                profile = load_profile(config_dir)
+                target = load_target(target_id, config_dir)
+                override = date.fromisoformat(snipe_date_str) if snipe_date_str else None
+                snipe_date = _compute_snipe_date(target, override)
+
+                if snipe_date is None:
+                    result = BookingResult(target_id=target_id, success=False, error=f"Past end_date {target.end_date}")
+                    event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
+                    return
+
+                client = ResyClient(profile)
+                try:
+                    await client.warmup()
+                    result = await client.snipe(target, snipe_date)
+                    result.target_id = target_id
+                    event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
+                finally:
+                    await client.close()
+            except Exception as e:
+                result = BookingResult(target_id=target_id, success=False, error=str(e))
+                event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
+
+        task = asyncio.create_task(_do_snipe())
+        _running_actions[action_key] = task
+        return {"status": "started", "action": "snipe", "target_id": target_id}
+
+    @app.post("/api/targets/{target_id}/stop")
+    async def stop_action(target_id: str):
+        """Cancel a running grab or snipe action."""
+        stopped = []
+        for prefix in ("grab", "snipe"):
+            key = f"{prefix}-{target_id}"
+            task = _running_actions.get(key)
+            if task and not task.done():
+                task.cancel()
+                stopped.append(prefix)
+        if stopped:
+            return {"status": "stopped", "actions": stopped}
+        return {"status": "nothing_running"}
 
     # ── Status API ──
 
