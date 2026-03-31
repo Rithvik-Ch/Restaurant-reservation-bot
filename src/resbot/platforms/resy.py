@@ -84,7 +84,7 @@ class ResyClient(ReservationPlatform):
         ) as client:
             resp = await client.post(
                 "/3/auth/password",
-                data={"email": email, "password": password},
+                json={"email": email, "password": password},
             )
             resp.raise_for_status()
             data = orjson.loads(resp.content)
