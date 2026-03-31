@@ -7,6 +7,7 @@ Usage: python3 diagnose.py
 import asyncio
 import json
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 # Add src/ to path
@@ -90,7 +91,6 @@ async def main():
 
         test_date = input("    Enter date to test (YYYY-MM-DD, e.g. 2026-04-09): ").strip()
         if not test_date:
-            from datetime import date, timedelta
             test_date = (date.today() + timedelta(days=7)).isoformat()
             print(f"    Using default: {test_date}")
 
@@ -148,13 +148,16 @@ async def main():
                 print(f"    Trying /4/venue/calendar instead...")
 
                 try:
+                    cal_start = test_date
+                    cal_end = (date.fromisoformat(test_date) + timedelta(days=365)).isoformat()
+                    print(f"    Using date range: {cal_start} to {cal_end}")
                     resp2 = await client.get(
                         "/4/venue/calendar",
                         params={
                             "venue_id": venue_id,
                             "num_seats": int(party),
-                            "start_date": test_date,
-                            "end_date": test_date,
+                            "start_date": cal_start,
+                            "end_date": cal_end,
                         },
                     )
                     print(f"\n[4] /4/venue/calendar response:")
