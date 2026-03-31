@@ -421,6 +421,10 @@ def grab(ctx, target_id, grab_date):
     target = load_target(target_id, config_dir)
     search_date = date.fromisoformat(grab_date)
 
+    if search_date < date.today():
+        click.echo(f"Error: date {search_date} is in the past. Use a future date.", err=True)
+        sys.exit(1)
+
     async def _grab():
         from resbot.engine import rank_slots
         from resbot.platforms.resy import ResyClient
@@ -480,6 +484,10 @@ def test_find(ctx, target_id, find_date):
 
     target = load_target(target_id, config_dir)
     search_date = date.fromisoformat(find_date)
+
+    if search_date < date.today():
+        click.echo(f"Error: date {search_date} is in the past. Use a future date.", err=True)
+        sys.exit(1)
 
     async def _find():
         profile = load_profile(config_dir)
