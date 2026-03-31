@@ -144,14 +144,41 @@ async def main():
                     print(f"\n    [OK] Found {total_slots} slot(s)! API is working correctly.")
 
             elif resp.status_code == 500:
-                print(f"    [FAIL] 500 Internal Server Error")
-                print(f"    Response body: {resp.text[:500]}")
-                print(f"\n    This usually means:")
-                print(f"    1. Venue ID {venue_id} doesn't exist or is invalid")
-                print(f"    2. Auth token expired (but step 2 passed, so probably not)")
-                print(f"    3. Resy is having server issues")
-                print(f"\n    To verify venue ID: go to resy.com, open the restaurant page,")
-                print(f"    check the URL or Network tab for venue_id=XXXXX")
+                print(f"    [FAIL] 500 from /4/find — this venue may use a different API")
+                print(f"    Trying /4/venue/calendar instead...")
+
+                try:
+                    resp2 = await client.get(
+                        "/4/venue/calendar",
+                        params={
+                            "venue_id": venue_id,
+                            "num_seats": int(party),
+                            "start_date": test_date,
+                            "end_date": test_date,
+                        },
+                    )
+                    print(f"\n[4] /4/venue/calendar response:")
+                    print(f"    Status: {resp2.status_code}")
+
+                    if resp2.status_code == 200:
+                        cal = resp2.json()
+                        print(f"    Keys: {list(cal.keys())}")
+                        scheduled = cal.get("scheduled", [])
+                        print(f"    Scheduled entries: {len(scheduled)}")
+                        for entry in scheduled[:10]:
+                            d = entry.get("date", "?")
+                            inv = entry.get("inventory", {})
+                            res_status = inv.get("reservation", "unknown")
+                            print(f"      {d}: {res_status}")
+                        if scheduled:
+                            print(f"\n    [OK] Calendar endpoint works for this venue!")
+                        else:
+                            print(f"\n    Calendar returned no dates.")
+                            print(f"    Raw: {resp2.text[:800]}")
+                    else:
+                        print(f"    Calendar also failed: {resp2.text[:300]}")
+                except Exception as e2:
+                    print(f"    Calendar request failed: {e2}")
             else:
                 print(f"    [FAIL] Unexpected status {resp.status_code}")
                 print(f"    Body: {resp.text[:500]}")
