@@ -400,9 +400,13 @@ def snipe(ctx, target_id, snipe_all, snipe_date):
 
         result = asyncio.run(run_single_snipe(target_id, config_dir, override_date=override_date))
         if result.success:
-            click.echo(f"SUCCESS! Confirmation: {result.confirmation_token}")
+            click.echo("")
+            click.echo("=" * 55)
+            click.echo("  *** RESERVATION CONFIRMED ***")
+            click.echo(f"  Confirmation: {result.confirmation_token}")
+            click.echo("=" * 55)
         else:
-            click.echo(f"Failed: {result.error}", err=True)
+            click.echo(f"\nFailed: {result.error}", err=True)
             sys.exit(1)
 
 
@@ -456,8 +460,15 @@ def grab(ctx, target_id, grab_date):
                     token = await client.get_booking_token(slot, search_date, target.party_size)
                     result = await client.book(token)
                     if result.success:
-                        click.echo(f"\nSUCCESS! Booked {slot.slot_time.strftime('%H:%M')}")
-                        click.echo(f"Confirmation: {result.confirmation_token}")
+                        click.echo("")
+                        click.echo("=" * 55)
+                        click.echo("  *** RESERVATION CONFIRMED ***")
+                        click.echo(f"  Restaurant: {target.venue_name}")
+                        click.echo(f"  Time:       {slot.slot_time.strftime('%H:%M')}")
+                        click.echo(f"  Date:       {search_date}")
+                        click.echo(f"  Party:      {target.party_size}")
+                        click.echo(f"  Confirm:    {result.confirmation_token}")
+                        click.echo("=" * 55)
                         return
                 except Exception as e:
                     click.echo(f"  Failed: {e}")
