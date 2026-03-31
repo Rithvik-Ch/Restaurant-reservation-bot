@@ -142,17 +142,30 @@ class ResyClient(ReservationPlatform):
         self, venue_id: str, day: date, party_size: int
     ) -> tuple[list[Slot], dict]:
         """Find available slots. Returns (slots, raw_response_dict)."""
-        resp = await self._session.get(
-            "/4/find",
-            params={
-                "venue_id": venue_id,
-                "day": day.isoformat(),
-                "party_size": party_size,
-                "lat": 0,
-                "long": 0,
-            },
-        )
-        resp.raise_for_status()
+        # Validate date is not in the past
+        from datetime import date as _date
+        if day < _date.today():
+            _print(f"[find] WARNING: date {day} is in the past! Resy will reject this.")
+
+        try:
+            resp = await self._session.get(
+                "/4/find",
+                params={
+                    "venue_id": venue_id,
+                    "day": day.isoformat(),
+                    "party_size": party_size,
+                    "lat": 0,
+                    "long": 0,
+                },
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            _print(f"[find] API error {e.response.status_code} for venue={venue_id} date={day} party={party_size}")
+            _print(f"[find] Response: {e.response.text[:500]}")
+            if e.response.status_code == 500:
+                _print("[find] 500 errors usually mean: expired auth token, invalid venue ID, or past date")
+            return [], {}
+
         data = orjson.loads(resp.content)
 
         slots = []
