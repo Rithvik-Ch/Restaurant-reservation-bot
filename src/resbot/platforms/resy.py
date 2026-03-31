@@ -335,20 +335,38 @@ class ResyClient(ReservationPlatform):
 
     async def book(self, booking_token: str) -> BookingResult:
         """Execute booking with pre-obtained token."""
-        payload = {
+        # Try payment_method_id as int if possible
+        pm_id = self._payment_method_id
+        try:
+            pm_id_int = int(pm_id)
+        except (ValueError, TypeError):
+            pm_id_int = pm_id
+
+        # JSON body with struct_payment_method as nested object
+        json_payload = {
             "book_token": booking_token,
-            "struct_payment_method": orjson.dumps({"id": self._payment_method_id}).decode(),
+            "struct_payment_method": {"id": pm_id_int},
             "source_id": "resy.com-venue-details",
         }
-        # Try JSON first, fall back to form-encoded
+        # Form body with struct_payment_method as JSON string
+        form_payload = {
+            "book_token": booking_token,
+            "struct_payment_method": orjson.dumps({"id": pm_id_int}).decode(),
+            "source_id": "resy.com-venue-details",
+        }
+
+        # Try JSON with nested object
         try:
-            resp = await self._session.post("/3/book", json=payload)
+            resp = await self._session.post("/3/book", json=json_payload)
             resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 415:
-                resp = await self._session.post("/3/book", data=payload)
+        except httpx.HTTPStatusError as e1:
+            _print(f"[book] JSON attempt failed ({e1.response.status_code}): {e1.response.text[:300]}")
+            # Try form-encoded with JSON string for payment
+            try:
+                resp = await self._session.post("/3/book", data=form_payload)
                 resp.raise_for_status()
-            else:
+            except httpx.HTTPStatusError as e2:
+                _print(f"[book] Form attempt failed ({e2.response.status_code}): {e2.response.text[:300]}")
                 raise
         data = orjson.loads(resp.content)
 
