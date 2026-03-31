@@ -312,15 +312,21 @@ class ResyClient(ReservationPlatform):
         self, slot: Slot, day: date, party_size: int
     ) -> str:
         """Get booking token from a slot config token."""
-        resp = await self._session.post(
-            "/3/details",
-            data={
-                "config_id": slot.config_token,
-                "day": day.isoformat(),
-                "party_size": party_size,
-            },
-        )
-        resp.raise_for_status()
+        payload = {
+            "config_id": slot.config_token,
+            "day": day.isoformat(),
+            "party_size": party_size,
+        }
+        # Try JSON first, fall back to form-encoded
+        try:
+            resp = await self._session.post("/3/details", json=payload)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 415:
+                resp = await self._session.post("/3/details", data=payload)
+                resp.raise_for_status()
+            else:
+                raise
         data = orjson.loads(resp.content)
         book_token = data.get("book_token", {}).get("value", "")
         if not book_token:
@@ -329,16 +335,21 @@ class ResyClient(ReservationPlatform):
 
     async def book(self, booking_token: str) -> BookingResult:
         """Execute booking with pre-obtained token."""
-        payment_body = orjson.dumps({"id": self._payment_method_id}).decode()
-        resp = await self._session.post(
-            "/3/book",
-            data={
-                "book_token": booking_token,
-                "struct_payment_method": payment_body,
-                "source_id": "resy.com-venue-details",
-            },
-        )
-        resp.raise_for_status()
+        payload = {
+            "book_token": booking_token,
+            "struct_payment_method": orjson.dumps({"id": self._payment_method_id}).decode(),
+            "source_id": "resy.com-venue-details",
+        }
+        # Try JSON first, fall back to form-encoded
+        try:
+            resp = await self._session.post("/3/book", json=payload)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 415:
+                resp = await self._session.post("/3/book", data=payload)
+                resp.raise_for_status()
+            else:
+                raise
         data = orjson.loads(resp.content)
 
         resy_token = data.get("resy_token", "")
