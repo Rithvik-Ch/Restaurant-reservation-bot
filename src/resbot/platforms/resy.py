@@ -354,36 +354,103 @@ class ResyClient(ReservationPlatform):
     # ── Snipe ──
 
     async def snipe(self, target: ReservationTarget, day: date) -> BookingResult:
-        """Speed-optimized snipe with immediate stop on success.
+        """Speed-optimized snipe with concurrent polling.
 
-        Uses find_slots_fast for minimal overhead in the hot loop.
-        Tries top 3 slots in parallel. Returns immediately on first success.
+        Instead of sequential find→sleep→find, fires multiple overlapping
+        find requests so one is always in-flight. Zero delay on empty results
+        during the critical first seconds after drop. Only backs off on
+        rate-limit responses (429/412).
         """
         from resbot.engine import rank_slots
 
-        sleep_interval = 1.0 / target.snipe_rate
         deadline = _time.monotonic() + target.snipe_timeout
         attempt = 0
+        # Concurrent find requests: fire this many in parallel
+        concurrency = max(1, min(int(target.snipe_rate // 3), 5))
+        # Create a faster session for snipe with tighter timeout
+        snipe_timeout = httpx.Timeout(3.0, connect=1.5)
 
         _print(f"\n{'='*60}")
         _print(f"[snipe] STARTING — {target.venue_name}")
         _print(f"[snipe] venue={target.venue_id} date={day} party={target.party_size}")
-        _print(f"[snipe] rate={target.snipe_rate}/s timeout={target.snipe_timeout}s")
+        _print(f"[snipe] rate={target.snipe_rate}/s concurrency={concurrency} timeout={target.snipe_timeout}s")
         _print(f"{'='*60}")
 
-        while _time.monotonic() < deadline:
-            attempt += 1
+        # Pre-build the find params once (avoid per-request dict creation)
+        find_params = {
+            "venue_id": target.venue_id,
+            "day": day.isoformat(),
+            "party_size": target.party_size,
+            "lat": 0,
+            "long": 0,
+        }
+
+        # Signal to stop all concurrent tasks on success
+        success_result: BookingResult | None = None
+
+        async def _poll_once() -> list[Slot]:
+            """Single find request with snipe-optimized timeout."""
             try:
-                # Use fast path — no raw data, no fallback overhead
-                slots = await self.find_slots_fast(target.venue_id, day, target.party_size)
+                resp = await self._session.get(
+                    "/4/find", params=find_params, timeout=snipe_timeout
+                )
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                if code in (429, 412):
+                    # Rate limited — back off briefly
+                    await asyncio.sleep(0.5)
+                return []
+            except (httpx.TimeoutException, httpx.ConnectError):
+                return []
+            data = orjson.loads(resp.content)
+            slots = []
+            for venue in data.get("results", {}).get("venues", []):
+                for sd in venue.get("slots", []):
+                    s = self._parse_slot(sd, day)
+                    if s:
+                        slots.append(s)
+            return slots
+
+        # Phase 1: Burst polling — fire concurrent finds with no delay
+        # For the first 10 seconds, be maximally aggressive
+        burst_end = _time.monotonic() + min(10.0, target.snipe_timeout)
+        sleep_interval = 1.0 / target.snipe_rate
+
+        while _time.monotonic() < deadline:
+            if success_result:
+                return success_result
+
+            attempt += 1
+            in_burst = _time.monotonic() < burst_end
+
+            try:
+                # Fire concurrent find requests
+                if in_burst and concurrency > 1:
+                    poll_tasks = [_poll_once() for _ in range(concurrency)]
+                    all_slots_lists = await asyncio.gather(*poll_tasks, return_exceptions=True)
+                    # Merge results from all concurrent finds
+                    slots = []
+                    seen_tokens = set()
+                    for sl in all_slots_lists:
+                        if isinstance(sl, list):
+                            for s in sl:
+                                if s.config_token not in seen_tokens:
+                                    seen_tokens.add(s.config_token)
+                                    slots.append(s)
+                else:
+                    slots = await _poll_once()
 
                 if attempt <= 3 or attempt % 20 == 0:
                     elapsed = target.snipe_timeout - (deadline - _time.monotonic())
-                    _print(f"[snipe] #{attempt} ({elapsed:.0f}s): {len(slots)} slot(s)")
+                    mode = "BURST" if in_burst else "poll"
+                    _print(f"[snipe] #{attempt} ({elapsed:.0f}s) [{mode}]: {len(slots)} slot(s)")
 
                 ranked = rank_slots(slots, target)
                 if not ranked:
-                    await asyncio.sleep(sleep_interval)
+                    # In burst mode, don't sleep — go again immediately
+                    if not in_burst:
+                        await asyncio.sleep(sleep_interval)
                     continue
 
                 # Try top 3 slots in parallel for speed
@@ -409,12 +476,16 @@ class ResyClient(ReservationPlatform):
                         if attempt <= 5:
                             _print(f"[snipe] {top[i].slot_time.strftime('%H:%M')} failed: {result}")
 
+                # Brief pause before retry to avoid hammering a taken slot
                 await asyncio.sleep(sleep_interval)
 
             except httpx.HTTPStatusError as e:
-                if e.response.status_code != 412:
+                if e.response.status_code in (429, 412):
+                    _print(f"[snipe] Rate limited ({e.response.status_code}), backing off...")
+                    await asyncio.sleep(1.0)
+                else:
                     _print(f"[snipe] HTTP {e.response.status_code}: {e.response.text[:150]}")
-                await asyncio.sleep(sleep_interval)
+                    await asyncio.sleep(sleep_interval)
             except Exception as e:
                 _print(f"[snipe] Error #{attempt}: {type(e).__name__}: {e}")
                 await asyncio.sleep(sleep_interval)
