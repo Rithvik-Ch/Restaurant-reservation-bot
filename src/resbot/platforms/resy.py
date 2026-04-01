@@ -360,15 +360,21 @@ class ResyClient(ReservationPlatform):
         find requests so one is always in-flight. Zero delay on empty results
         during the critical first seconds after drop. Only backs off on
         rate-limit responses (429/412).
+
+        Uses an asyncio.Event gate to ensure only ONE booking goes through,
+        even when multiple slots are attempted in parallel.
         """
         from resbot.engine import rank_slots
 
         deadline = _time.monotonic() + target.snipe_timeout
         attempt = 0
-        # Concurrent find requests: fire this many in parallel
         concurrency = max(1, min(int(target.snipe_rate // 3), 5))
-        # Create a faster session for snipe with tighter timeout
         snipe_timeout = httpx.Timeout(3.0, connect=1.5)
+
+        # ── Duplicate-booking guard ──
+        # Once set, no further /3/book calls will be made.
+        booked_event = asyncio.Event()
+        booked_result: list[BookingResult] = []  # mutable container for the winner
 
         _print(f"\n{'='*60}")
         _print(f"[snipe] STARTING — {target.venue_name}")
@@ -376,7 +382,6 @@ class ResyClient(ReservationPlatform):
         _print(f"[snipe] rate={target.snipe_rate}/s concurrency={concurrency} timeout={target.snipe_timeout}s")
         _print(f"{'='*60}")
 
-        # Pre-build the find params once (avoid per-request dict creation)
         find_params = {
             "venue_id": target.venue_id,
             "day": day.isoformat(),
@@ -385,20 +390,17 @@ class ResyClient(ReservationPlatform):
             "long": 0,
         }
 
-        # Signal to stop all concurrent tasks on success
-        success_result: BookingResult | None = None
-
         async def _poll_once() -> list[Slot]:
             """Single find request with snipe-optimized timeout."""
+            if booked_event.is_set():
+                return []
             try:
                 resp = await self._session.get(
                     "/4/find", params=find_params, timeout=snipe_timeout
                 )
                 resp.raise_for_status()
             except httpx.HTTPStatusError as e:
-                code = e.response.status_code
-                if code in (429, 412):
-                    # Rate limited — back off briefly
+                if e.response.status_code in (429, 412):
                     await asyncio.sleep(0.5)
                 return []
             except (httpx.TimeoutException, httpx.ConnectError):
@@ -412,24 +414,50 @@ class ResyClient(ReservationPlatform):
                         slots.append(s)
             return slots
 
-        # Phase 1: Burst polling — fire concurrent finds with no delay
-        # For the first 10 seconds, be maximally aggressive
+        async def _guarded_book(slot: Slot) -> BookingResult:
+            """Book a slot, but only if no other booking has succeeded yet."""
+            # Gate 1: check before getting token
+            if booked_event.is_set():
+                raise RuntimeError("Already booked — skipping")
+            token = await self.get_booking_token(slot, day, target.party_size)
+            # Gate 2: check before the actual /3/book call
+            if booked_event.is_set():
+                _print(f"[snipe] {slot.slot_time.strftime('%H:%M')}: already booked, aborting book call")
+                raise RuntimeError("Already booked — skipping")
+            result = await self.book(token)
+            if result.success:
+                # First one to set the event wins
+                if not booked_event.is_set():
+                    booked_event.set()
+                    booked_result.append(result)
+                else:
+                    # We're a duplicate — cancel this reservation
+                    _print(f"[snipe] DUPLICATE booking detected for {slot.slot_time.strftime('%H:%M')} — attempting to cancel")
+                    try:
+                        await self._cancel_reservation(result.reservation_id)
+                        _print(f"[snipe] Duplicate reservation {result.reservation_id} cancelled")
+                    except Exception as ce:
+                        _print(f"[snipe] WARNING: could not cancel duplicate {result.reservation_id}: {ce}")
+                    raise RuntimeError("Duplicate booking cancelled")
+            return result
+
         burst_end = _time.monotonic() + min(10.0, target.snipe_timeout)
         sleep_interval = 1.0 / target.snipe_rate
 
         while _time.monotonic() < deadline:
-            if success_result:
-                return success_result
+            # Check if we already booked
+            if booked_event.is_set() and booked_result:
+                result = booked_result[0]
+                result.target_id = target.id
+                return result
 
             attempt += 1
             in_burst = _time.monotonic() < burst_end
 
             try:
-                # Fire concurrent find requests
                 if in_burst and concurrency > 1:
                     poll_tasks = [_poll_once() for _ in range(concurrency)]
                     all_slots_lists = await asyncio.gather(*poll_tasks, return_exceptions=True)
-                    # Merge results from all concurrent finds
                     slots = []
                     seen_tokens = set()
                     for sl in all_slots_lists:
@@ -448,35 +476,34 @@ class ResyClient(ReservationPlatform):
 
                 ranked = rank_slots(slots, target)
                 if not ranked:
-                    # In burst mode, don't sleep — go again immediately
                     if not in_burst:
                         await asyncio.sleep(sleep_interval)
                     continue
 
-                # Try top 3 slots in parallel for speed
-                top = ranked[:3]
-                _print(f"[snipe] Booking: {', '.join(s.slot_time.strftime('%H:%M') for s in top)}")
-                tasks = [self._try_book_slot(s, day, target.party_size) for s in top]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
+                # Book only the BEST slot (not top 3) to minimize duplicate risk
+                # If it fails, the next loop iteration will try the next best
+                best = ranked[0]
+                _print(f"[snipe] Booking: {best.slot_time.strftime('%H:%M')}")
 
-                for i, result in enumerate(results):
-                    if isinstance(result, BookingResult) and result.success:
+                try:
+                    result = await _guarded_book(best)
+                    if result.success and booked_event.is_set() and booked_result:
+                        result = booked_result[0]
                         result.target_id = target.id
                         _print(f"\n{'='*60}")
                         _print(f"  *** RESERVATION CONFIRMED ***")
                         _print(f"  Restaurant: {target.venue_name}")
-                        _print(f"  Time:       {top[i].slot_time.strftime('%H:%M')}")
+                        _print(f"  Time:       {best.slot_time.strftime('%H:%M')}")
                         _print(f"  Date:       {day}")
                         _print(f"  Party:      {target.party_size}")
                         _print(f"  Confirm:    {result.confirmation_token}")
                         _print(f"  Attempt:    #{attempt}")
                         _print(f"{'='*60}\n")
-                        return result  # ← IMMEDIATE STOP
-                    elif isinstance(result, Exception):
-                        if attempt <= 5:
-                            _print(f"[snipe] {top[i].slot_time.strftime('%H:%M')} failed: {result}")
+                        return result
+                except Exception as e:
+                    if attempt <= 5:
+                        _print(f"[snipe] {best.slot_time.strftime('%H:%M')} failed: {e}")
 
-                # Brief pause before retry to avoid hammering a taken slot
                 await asyncio.sleep(sleep_interval)
 
             except httpx.HTTPStatusError as e:
@@ -496,5 +523,16 @@ class ResyClient(ReservationPlatform):
     async def _try_book_slot(
         self, slot: Slot, day: date, party_size: int
     ) -> BookingResult:
+        """Book a slot (used by grab, not snipe)."""
         token = await self.get_booking_token(slot, day, party_size)
         return await self.book(token)
+
+    async def _cancel_reservation(self, reservation_id: str | None) -> None:
+        """Best-effort cancel of a duplicate reservation."""
+        if not reservation_id:
+            return
+        resp = await self._session.post(
+            "/3/cancel",
+            data={"resy_token": reservation_id},
+        )
+        resp.raise_for_status()
