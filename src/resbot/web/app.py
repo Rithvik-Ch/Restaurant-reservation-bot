@@ -304,12 +304,48 @@ def create_app(config_dir=None) -> FastAPI:
                 client = ResyClient(profile)
                 try:
                     await client.warmup()
-                    slots, _raw = await client.find_slots(target.venue_id, grab_date, target.party_size)
+                    slots, raw = await client.find_slots(target.venue_id, grab_date, target.party_size)
+
+                    # --- Diagnostic: no slots from API ---
                     if not slots:
-                        result = BookingResult(target_id=target_id, success=False, error="No slots found")
+                        # Check if the API returned venue data but with empty slots
+                        venues = raw.get("results", {}).get("venues", [])
+                        if venues:
+                            # Venue found but no time slots — fully booked
+                            diag = (
+                                f"No available time slots for {target.venue_name} on {grab_date}. "
+                                f"The restaurant is listed on Resy but all slots appear fully booked "
+                                f"for party size {target.party_size}."
+                            )
+                        elif raw.get("results") is not None:
+                            # API responded but venue not in results — may not take reservations this day
+                            diag = (
+                                f"Resy returned no venue data for {target.venue_name} (ID: {target.venue_id}) "
+                                f"on {grab_date}. The restaurant may not accept reservations on this date, "
+                                f"or the venue ID may be incorrect."
+                            )
+                        else:
+                            diag = (
+                                f"Resy API returned an unexpected response for venue {target.venue_id} on {grab_date}. "
+                                f"Response keys: {list(raw.keys()) if raw else 'empty'}. "
+                                f"This may indicate an API issue or invalid venue ID."
+                            )
+                        result = BookingResult(target_id=target_id, success=False, error=diag)
                         event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
                         return
+
+                    # --- Diagnostic: slots found, rank them ---
+                    window = target.effective_window
                     ranked = rank_slots(slots, target)
+                    window_str = f"{window.earliest.strftime('%H:%M')}-{window.latest.strftime('%H:%M')}"
+                    slot_times = ", ".join(s.slot_time.strftime("%H:%M") for s in slots[:10])
+                    diag_prefix = (
+                        f"Found {len(slots)} slot(s): [{slot_times}{'...' if len(slots) > 10 else ''}]. "
+                        f"Window {window_str} → {len(ranked)} match(es). "
+                    )
+
+                    # --- Attempt to book top matches ---
+                    book_errors = []
                     for slot in ranked[:3]:
                         try:
                             token = await client.get_booking_token(slot, grab_date, target.party_size)
@@ -318,14 +354,22 @@ def create_app(config_dir=None) -> FastAPI:
                                 result.target_id = target_id
                                 event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
                                 return
-                        except Exception:
+                        except Exception as e:
+                            book_errors.append(f"{slot.slot_time.strftime('%H:%M')}: {e}")
                             continue
-                    result = BookingResult(target_id=target_id, success=False, error="Could not book any slot")
+
+                    # All booking attempts failed
+                    if book_errors:
+                        err_detail = "; ".join(book_errors)
+                        diag = diag_prefix + f"Booking failed for all attempted slots — {err_detail}"
+                    else:
+                        diag = diag_prefix + "No bookable slots after ranking."
+                    result = BookingResult(target_id=target_id, success=False, error=diag)
                     event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
                 finally:
                     await client.close()
             except Exception as e:
-                result = BookingResult(target_id=target_id, success=False, error=str(e))
+                result = BookingResult(target_id=target_id, success=False, error=f"System error: {type(e).__name__}: {e}")
                 event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
 
         task = asyncio.create_task(_do_grab())
@@ -353,7 +397,7 @@ def create_app(config_dir=None) -> FastAPI:
                 snipe_date = _compute_snipe_date(target, override)
 
                 if snipe_date is None:
-                    result = BookingResult(target_id=target_id, success=False, error=f"Past end_date {target.end_date}")
+                    result = BookingResult(target_id=target_id, success=False, error=f"Target date is past end_date ({target.end_date}). Update the target's date range.")
                     event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
                     return
 
@@ -362,11 +406,18 @@ def create_app(config_dir=None) -> FastAPI:
                     await client.warmup()
                     result = await client.snipe(target, snipe_date)
                     result.target_id = target_id
+                    # Enhance generic "No slots found" with more context
+                    if not result.success and result.error == "No slots found":
+                        result.error = (
+                            f"Snipe timed out after {target.snipe_timeout}s — no bookable slots appeared for "
+                            f"{target.venue_name} on {snipe_date} (party of {target.party_size}). "
+                            f"This usually means slots haven't dropped yet, or the date is fully booked."
+                        )
                     event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
                 finally:
                     await client.close()
             except Exception as e:
-                result = BookingResult(target_id=target_id, success=False, error=str(e))
+                result = BookingResult(target_id=target_id, success=False, error=f"System error: {type(e).__name__}: {e}")
                 event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
 
         task = asyncio.create_task(_do_snipe())
