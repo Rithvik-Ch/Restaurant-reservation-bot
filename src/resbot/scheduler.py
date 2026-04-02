@@ -89,8 +89,8 @@ class ReservationScheduler:
         tz = ZoneInfo(target.drop_timezone)
         drop = target.drop_time
 
-        # Schedule warmup 30 seconds before drop
-        warmup_time = _subtract_seconds(drop, 30)
+        # Schedule warmup 60 seconds before drop (aggressively primes connection pool)
+        warmup_time = _subtract_seconds(drop, 60)
         self._scheduler.add_job(
             self._warmup,
             CronTrigger(
@@ -105,13 +105,16 @@ class ReservationScheduler:
             name=f"Warmup for {target.venue_name}",
         )
 
-        # Schedule snipe at drop time
+        # Schedule snipe 5 seconds BEFORE drop time
+        # Resy's server clock may be slightly ahead — starting early
+        # catches slots that appear 1-3 seconds before the official drop.
+        early_drop = _subtract_seconds(drop, 5)
         self._scheduler.add_job(
             self._execute_snipe,
             CronTrigger(
-                hour=drop.hour,
-                minute=drop.minute,
-                second=drop.second,
+                hour=early_drop.hour,
+                minute=early_drop.minute,
+                second=early_drop.second,
                 timezone=tz,
             ),
             args=[target],
