@@ -342,11 +342,18 @@ class ResyClient(ReservationPlatform):
         )
 
     async def warmup(self) -> None:
-        """Warm the HTTP/2 connection pool before snipe time."""
-        try:
-            await self._session.get("/2/user")
-        except Exception:
-            pass
+        """Aggressively warm the HTTP/2 connection pool before snipe time.
+
+        Opens multiple concurrent connections so they're ready for burst mode.
+        """
+        async def _ping():
+            try:
+                await self._session.get("/2/user")
+            except Exception:
+                pass
+
+        # Open several connections in parallel to prime the pool
+        await asyncio.gather(*[_ping() for _ in range(5)], return_exceptions=True)
 
     async def close(self) -> None:
         await self._session.aclose()
