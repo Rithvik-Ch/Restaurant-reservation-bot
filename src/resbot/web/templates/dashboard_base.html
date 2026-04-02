@@ -73,6 +73,7 @@
 
     <div class="tabs">
         <div class="tab active" onclick="showTab('dashboard')">Dashboard</div>
+        <div class="tab" onclick="showTab('logs')">Activity Log</div>
         <div class="tab" onclick="showTab('profile')">Profile</div>
         <div class="tab" onclick="showTab('targets')">Targets</div>
     </div>
@@ -82,6 +83,15 @@
         {{CARDS}}
         <div class="log" id="log">
             <div class="log-entry">Listening for events...</div>
+        </div>
+    </div>
+
+    <!-- Activity Log Tab -->
+    <div id="tab-logs" class="tab-content">
+        <h2>Activity Log</h2>
+        <p style="color: #8b949e; font-size: 0.85rem; margin-bottom: 12px;">History of all grab, snipe, and scheduled run attempts. Persisted to disk.</p>
+        <div id="logs-list" class="form-section" style="max-width: 100%; max-height: 600px; overflow-y: auto;">
+            <div class="empty">Loading...</div>
         </div>
     </div>
 
@@ -177,7 +187,8 @@ function showTab(name) {
     document.querySelectorAll('.tab-content').forEach(function(el) { el.classList.remove('active'); });
     document.querySelectorAll('.tab').forEach(function(el) { el.classList.remove('active'); });
     document.getElementById('tab-' + name).classList.add('active');
-    document.querySelectorAll('.tab')[['dashboard','profile','targets'].indexOf(name)].classList.add('active');
+    document.querySelectorAll('.tab')[['dashboard','logs','profile','targets'].indexOf(name)].classList.add('active');
+    if (name === 'logs') loadLogs();
     if (name === 'profile') loadProfile();
     if (name === 'targets') loadTargets();
 }
@@ -347,6 +358,38 @@ function clearTargetForm() {
     document.getElementById('t-tz').value = 'America/New_York';
     document.getElementById('t-rate').value = '10';
     document.getElementById('t-timeout').value = '300';
+}
+
+// ── Activity Log ──
+function loadLogs() {
+    fetch('/api/logs?days=7').then(function(r) { return r.json(); }).then(function(entries) {
+        var el = document.getElementById('logs-list');
+        if (!entries.length) { el.innerHTML = '<div class="empty">No activity logged yet. Run a grab or snipe to see results here.</div>'; return; }
+        var html = '<table style="width:100%; border-collapse:collapse; font-size:0.82rem;">';
+        html += '<tr style="border-bottom:1px solid #30363d; color:#8b949e;">' +
+            '<th style="text-align:left; padding:6px;">Time</th>' +
+            '<th style="text-align:left; padding:6px;">Target</th>' +
+            '<th style="text-align:left; padding:6px;">Mode</th>' +
+            '<th style="text-align:left; padding:6px;">Date</th>' +
+            '<th style="text-align:left; padding:6px;">Result</th>' +
+            '<th style="text-align:left; padding:6px;">Details</th></tr>';
+        entries.forEach(function(e) {
+            var color = e.success ? '#3fb950' : '#f85149';
+            var icon = e.success ? 'BOOKED' : 'FAILED';
+            var ts = e.timestamp ? e.timestamp.replace('T', ' ') : '';
+            var name = e.venue_name || e.target_id;
+            var conf = e.confirmation ? ' [' + e.confirmation + ']' : '';
+            html += '<tr style="border-bottom:1px solid #21262d;">' +
+                '<td style="padding:6px; color:#8b949e; white-space:nowrap;">' + ts + '</td>' +
+                '<td style="padding:6px; color:#c9d1d9;">' + name + '</td>' +
+                '<td style="padding:6px;"><span style="background:#21262d; padding:2px 6px; border-radius:4px;">' + (e.action || '') + '</span></td>' +
+                '<td style="padding:6px; color:#8b949e;">' + (e.target_date || '') + '</td>' +
+                '<td style="padding:6px; color:' + color + '; font-weight:600;">' + icon + conf + '</td>' +
+                '<td style="padding:6px; color:#8b949e; word-break:break-word; max-width:400px;">' + (e.detail || '') + '</td></tr>';
+        });
+        html += '</table>';
+        el.innerHTML = html;
+    });
 }
 
 // ── Mode actions (grab / snipe) ──
