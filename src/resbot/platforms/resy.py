@@ -361,15 +361,10 @@ class ResyClient(ReservationPlatform):
     # ── Snipe ──
 
     async def snipe(self, target: ReservationTarget, day: date) -> BookingResult:
-        """Speed-optimized snipe with concurrent polling.
+        """Speed-optimized snipe with concurrent polling and telemetry.
 
-        Instead of sequential find→sleep→find, fires multiple overlapping
-        find requests so one is always in-flight. Zero delay on empty results
-        during the critical first seconds after drop. Only backs off on
-        rate-limit responses (429/412).
-
-        Uses an asyncio.Event gate to ensure only ONE booking goes through,
-        even when multiple slots are attempted in parallel.
+        Tracks detailed diagnostics: whether slots were ever seen, when they
+        appeared/disappeared, booking attempt results, and timing breakdown.
         """
         from resbot.engine import rank_slots
 
@@ -377,16 +372,34 @@ class ResyClient(ReservationPlatform):
         attempt = 0
         concurrency = max(1, min(int(target.snipe_rate // 3), 5))
         snipe_timeout = httpx.Timeout(3.0, connect=1.5)
+        start_mono = _time.monotonic()
+        start_wall = datetime.now()
+
+        # ── Telemetry ──
+        telem = {
+            "slots_ever_seen": False,
+            "first_seen_time": None,       # wall clock when slots first appeared
+            "first_seen_attempt": 0,       # attempt number
+            "first_seen_elapsed": 0.0,     # seconds after snipe start
+            "slots_seen_times": [],        # list of (attempt, count, elapsed)
+            "peak_slot_count": 0,
+            "peak_slot_times": [],         # the actual time strings at peak
+            "slots_disappeared": False,    # slots appeared then went to 0
+            "book_attempts": [],           # list of {time, error_or_success}
+            "rate_limits": 0,
+            "timeouts": 0,
+            "http_errors": [],
+        }
 
         # ── Duplicate-booking guard ──
-        # Once set, no further /3/book calls will be made.
         booked_event = asyncio.Event()
-        booked_result: list[BookingResult] = []  # mutable container for the winner
+        booked_result: list[BookingResult] = []
 
         _print(f"\n{'='*60}")
         _print(f"[snipe] STARTING — {target.venue_name}")
         _print(f"[snipe] venue={target.venue_id} date={day} party={target.party_size}")
         _print(f"[snipe] rate={target.snipe_rate}/s concurrency={concurrency} timeout={target.snipe_timeout}s")
+        _print(f"[snipe] start={start_wall.strftime('%H:%M:%S.%f')[:-3]}")
         _print(f"{'='*60}")
 
         find_params = {
@@ -398,7 +411,6 @@ class ResyClient(ReservationPlatform):
         }
 
         async def _poll_once() -> list[Slot]:
-            """Single find request with snipe-optimized timeout."""
             if booked_event.is_set():
                 return []
             try:
@@ -408,9 +420,16 @@ class ResyClient(ReservationPlatform):
                 resp.raise_for_status()
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (429, 412):
+                    telem["rate_limits"] += 1
                     await asyncio.sleep(0.5)
+                else:
+                    telem["http_errors"].append(f"HTTP {e.response.status_code}")
                 return []
-            except (httpx.TimeoutException, httpx.ConnectError):
+            except httpx.TimeoutException:
+                telem["timeouts"] += 1
+                return []
+            except httpx.ConnectError:
+                telem["timeouts"] += 1
                 return []
             data = orjson.loads(resp.content)
             slots = []
@@ -422,23 +441,18 @@ class ResyClient(ReservationPlatform):
             return slots
 
         async def _guarded_book(slot: Slot) -> BookingResult:
-            """Book a slot, but only if no other booking has succeeded yet."""
-            # Gate 1: check before getting token
             if booked_event.is_set():
                 raise RuntimeError("Already booked — skipping")
             token = await self.get_booking_token(slot, day, target.party_size)
-            # Gate 2: check before the actual /3/book call
             if booked_event.is_set():
                 _print(f"[snipe] {slot.slot_time.strftime('%H:%M')}: already booked, aborting book call")
                 raise RuntimeError("Already booked — skipping")
             result = await self.book(token)
             if result.success:
-                # First one to set the event wins
                 if not booked_event.is_set():
                     booked_event.set()
                     booked_result.append(result)
                 else:
-                    # We're a duplicate — cancel this reservation
                     _print(f"[snipe] DUPLICATE booking detected for {slot.slot_time.strftime('%H:%M')} — attempting to cancel")
                     try:
                         await self._cancel_reservation(result.reservation_id)
@@ -450,9 +464,9 @@ class ResyClient(ReservationPlatform):
 
         burst_end = _time.monotonic() + min(10.0, target.snipe_timeout)
         sleep_interval = 1.0 / target.snipe_rate
+        had_slots_last = False
 
         while _time.monotonic() < deadline:
-            # Check if we already booked
             if booked_event.is_set() and booked_result:
                 result = booked_result[0]
                 result.target_id = target.id
@@ -476,8 +490,30 @@ class ResyClient(ReservationPlatform):
                 else:
                     slots = await _poll_once()
 
+                elapsed = _time.monotonic() - start_mono
+
+                # ── Track telemetry ──
+                if slots:
+                    if not telem["slots_ever_seen"]:
+                        telem["slots_ever_seen"] = True
+                        telem["first_seen_time"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                        telem["first_seen_attempt"] = attempt
+                        telem["first_seen_elapsed"] = round(elapsed, 2)
+                        _print(f"[snipe] *** SLOTS APPEARED at {telem['first_seen_time']} (attempt #{attempt}, +{elapsed:.1f}s) ***")
+
+                    slot_times_str = [s.slot_time.strftime("%H:%M") for s in slots]
+                    telem["slots_seen_times"].append((attempt, len(slots), round(elapsed, 1)))
+                    if len(slots) > telem["peak_slot_count"]:
+                        telem["peak_slot_count"] = len(slots)
+                        telem["peak_slot_times"] = slot_times_str[:15]
+                    had_slots_last = True
+                elif had_slots_last:
+                    # Slots disappeared
+                    telem["slots_disappeared"] = True
+                    _print(f"[snipe] Slots DISAPPEARED at attempt #{attempt} (+{elapsed:.1f}s)")
+                    had_slots_last = False
+
                 if attempt <= 3 or attempt % 20 == 0:
-                    elapsed = target.snipe_timeout - (deadline - _time.monotonic())
                     mode = "BURST" if in_burst else "poll"
                     _print(f"[snipe] #{attempt} ({elapsed:.0f}s) [{mode}]: {len(slots)} slot(s)")
 
@@ -487,14 +523,18 @@ class ResyClient(ReservationPlatform):
                         await asyncio.sleep(sleep_interval)
                     continue
 
-                # Book only the BEST slot (not top 3) to minimize duplicate risk
-                # If it fails, the next loop iteration will try the next best
                 best = ranked[0]
                 _print(f"[snipe] Booking: {best.slot_time.strftime('%H:%M')}")
 
                 try:
                     result = await _guarded_book(best)
+                    book_elapsed = _time.monotonic() - start_mono
                     if result.success and booked_event.is_set() and booked_result:
+                        telem["book_attempts"].append({
+                            "time": best.slot_time.strftime("%H:%M"),
+                            "result": "SUCCESS",
+                            "elapsed": round(book_elapsed, 2),
+                        })
                         result = booked_result[0]
                         result.target_id = target.id
                         _print(f"\n{'='*60}")
@@ -505,9 +545,22 @@ class ResyClient(ReservationPlatform):
                         _print(f"  Party:      {target.party_size}")
                         _print(f"  Confirm:    {result.confirmation_token}")
                         _print(f"  Attempt:    #{attempt}")
+                        _print(f"  Latency:    {book_elapsed:.2f}s from snipe start")
                         _print(f"{'='*60}\n")
                         return result
+                    else:
+                        telem["book_attempts"].append({
+                            "time": best.slot_time.strftime("%H:%M"),
+                            "result": result.error or "booking returned failure",
+                            "elapsed": round(book_elapsed, 2),
+                        })
                 except Exception as e:
+                    book_elapsed = _time.monotonic() - start_mono
+                    telem["book_attempts"].append({
+                        "time": best.slot_time.strftime("%H:%M"),
+                        "result": str(e),
+                        "elapsed": round(book_elapsed, 2),
+                    })
                     if attempt <= 5:
                         _print(f"[snipe] {best.slot_time.strftime('%H:%M')} failed: {e}")
 
@@ -515,17 +568,56 @@ class ResyClient(ReservationPlatform):
 
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (429, 412):
+                    telem["rate_limits"] += 1
                     _print(f"[snipe] Rate limited ({e.response.status_code}), backing off...")
                     await asyncio.sleep(1.0)
                 else:
+                    telem["http_errors"].append(f"HTTP {e.response.status_code}")
                     _print(f"[snipe] HTTP {e.response.status_code}: {e.response.text[:150]}")
                     await asyncio.sleep(sleep_interval)
             except Exception as e:
                 _print(f"[snipe] Error #{attempt}: {type(e).__name__}: {e}")
                 await asyncio.sleep(sleep_interval)
 
-        _print(f"\n[snipe] TIMED OUT after {attempt} attempts ({target.snipe_timeout}s)")
-        return BookingResult(target_id=target.id, success=False, error="No slots found")
+        # ── Build diagnostic summary ──
+        total_time = round(_time.monotonic() - start_mono, 1)
+        diag_parts = [f"Snipe completed: {attempt} attempts over {total_time}s."]
+
+        if not telem["slots_ever_seen"]:
+            diag_parts.append(
+                "ZERO slots were ever seen in the API during the entire snipe window. "
+                "Slots were likely reserved through Resy priority/concierge channels "
+                "and never appeared in the public API."
+            )
+        else:
+            diag_parts.append(
+                f"Slots WERE seen: first appeared at {telem['first_seen_time']} "
+                f"(attempt #{telem['first_seen_attempt']}, +{telem['first_seen_elapsed']}s after start). "
+                f"Peak: {telem['peak_slot_count']} slot(s) [{', '.join(telem['peak_slot_times'])}]."
+            )
+            if telem["slots_disappeared"]:
+                diag_parts.append("Slots appeared then disappeared (grabbed by others).")
+            times_seen = len(telem["slots_seen_times"])
+            diag_parts.append(f"Slots visible on {times_seen} of {attempt} poll(s).")
+
+        if telem["book_attempts"]:
+            book_summary = []
+            for ba in telem["book_attempts"]:
+                book_summary.append(f"{ba['time']} @ +{ba['elapsed']}s: {ba['result']}")
+            diag_parts.append(f"Booking attempts: {'; '.join(book_summary)}")
+
+        if telem["rate_limits"]:
+            diag_parts.append(f"Rate limited {telem['rate_limits']} time(s).")
+        if telem["timeouts"]:
+            diag_parts.append(f"Request timeouts: {telem['timeouts']}.")
+        if telem["http_errors"]:
+            unique_errs = list(set(telem["http_errors"][:5]))
+            diag_parts.append(f"HTTP errors: {', '.join(unique_errs)}.")
+
+        diagnostic = " ".join(diag_parts)
+        _print(f"\n[snipe] DIAGNOSTIC: {diagnostic}")
+
+        return BookingResult(target_id=target.id, success=False, error=diagnostic)
 
     async def _try_book_slot(
         self, slot: Slot, day: date, party_size: int

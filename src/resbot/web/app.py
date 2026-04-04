@@ -423,12 +423,6 @@ def create_app(config_dir=None) -> FastAPI:
                     await client.warmup()
                     result = await client.snipe(target, snipe_date)
                     result.target_id = target_id
-                    if not result.success and result.error == "No slots found":
-                        result.error = (
-                            f"Snipe timed out after {target.snipe_timeout}s — no bookable slots appeared for "
-                            f"{target.venue_name} on {snipe_date} (party of {target.party_size}). "
-                            f"This usually means slots haven't dropped yet, or the date is fully booked."
-                        )
                     event_queue.put_nowait({"type": "result", "data": result.model_dump(mode="json")})
                     log_attempt(target_id=target_id, action="snipe", target_date=str(snipe_date),
                                 success=result.success, detail=result.error or "Reservation confirmed",
