@@ -80,6 +80,8 @@ class ReservationTarget(BaseModel):
     max_retry_days: int = Field(default=30, ge=1)
     snipe_rate: float = Field(default=10.0, ge=1.0, le=50.0)
     snipe_timeout: int = Field(default=300, ge=10)
+    watch_duration: int = Field(default=0, ge=0, description="Minutes to watch for cancellations after snipe (0 = off)")
+    watch_interval: int = Field(default=15, ge=5, le=120, description="Seconds between polls during watch phase")
     enabled: bool = True
 
     @property

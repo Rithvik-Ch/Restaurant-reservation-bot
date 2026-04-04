@@ -85,6 +85,7 @@ def _render_dashboard(targets, statuses) -> str:
                 <dt>Dates</dt><dd>{t.start_date or 'auto'} &rarr; {t.end_date or 'no limit'}</dd>
                 <dt>Rate</dt><dd>{t.snipe_rate} req/sec</dd>
                 <dt>Timeout</dt><dd>{t.snipe_timeout}s</dd>
+                <dt>Watch</dt><dd>{f'{t.watch_duration}min (every {t.watch_interval}s)' if t.watch_duration else 'off'}</dd>
                 {status_rows}
             </dl>
             <div class="mode-section" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #30363d;">

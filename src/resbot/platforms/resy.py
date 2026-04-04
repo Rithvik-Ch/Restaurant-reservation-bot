@@ -579,9 +579,99 @@ class ResyClient(ReservationPlatform):
                 _print(f"[snipe] Error #{attempt}: {type(e).__name__}: {e}")
                 await asyncio.sleep(sleep_interval)
 
+        # ── Watch phase: monitor for cancellations ──
+        watch_mins = target.watch_duration
+        if watch_mins > 0 and not booked_event.is_set():
+            watch_interval = target.watch_interval
+            watch_deadline = _time.monotonic() + (watch_mins * 60)
+            watch_polls = 0
+            _print(f"\n[watch] Entering watch mode for {watch_mins}min (polling every {watch_interval}s)")
+            _print(f"[watch] Monitoring for cancellations...")
+
+            while _time.monotonic() < watch_deadline:
+                if booked_event.is_set():
+                    break
+                watch_polls += 1
+                try:
+                    slots = await _poll_once()
+                    elapsed_total = _time.monotonic() - start_mono
+                    watch_elapsed = elapsed_total - target.snipe_timeout
+
+                    if slots:
+                        slot_times_str = [s.slot_time.strftime("%H:%M") for s in slots]
+                        _print(f"[watch] CANCELLATION DETECTED! {len(slots)} slot(s): {', '.join(slot_times_str)}")
+
+                        if not telem["slots_ever_seen"]:
+                            telem["slots_ever_seen"] = True
+                            telem["first_seen_time"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                            telem["first_seen_attempt"] = attempt + watch_polls
+                            telem["first_seen_elapsed"] = round(elapsed_total, 2)
+                        telem["slots_seen_times"].append((attempt + watch_polls, len(slots), round(elapsed_total, 1)))
+                        if len(slots) > telem["peak_slot_count"]:
+                            telem["peak_slot_count"] = len(slots)
+                            telem["peak_slot_times"] = slot_times_str[:15]
+
+                        ranked = rank_slots(slots, target)
+                        if ranked:
+                            best = ranked[0]
+                            _print(f"[watch] Booking cancellation slot: {best.slot_time.strftime('%H:%M')}")
+                            try:
+                                result = await _guarded_book(best)
+                                book_elapsed = _time.monotonic() - start_mono
+                                if result.success and booked_event.is_set() and booked_result:
+                                    telem["book_attempts"].append({
+                                        "time": best.slot_time.strftime("%H:%M"),
+                                        "result": "SUCCESS (watch/cancellation)",
+                                        "elapsed": round(book_elapsed, 2),
+                                    })
+                                    result = booked_result[0]
+                                    result.target_id = target.id
+                                    _print(f"\n{'='*60}")
+                                    _print(f"  *** RESERVATION CONFIRMED (CANCELLATION) ***")
+                                    _print(f"  Restaurant: {target.venue_name}")
+                                    _print(f"  Time:       {best.slot_time.strftime('%H:%M')}")
+                                    _print(f"  Date:       {day}")
+                                    _print(f"  Party:      {target.party_size}")
+                                    _print(f"  Confirm:    {result.confirmation_token}")
+                                    _print(f"  Phase:      watch (+{watch_elapsed:.0f}s after snipe)")
+                                    _print(f"{'='*60}\n")
+                                    return result
+                                else:
+                                    telem["book_attempts"].append({
+                                        "time": best.slot_time.strftime("%H:%M"),
+                                        "result": result.error or "booking failed",
+                                        "elapsed": round(book_elapsed, 2),
+                                    })
+                            except Exception as e:
+                                book_elapsed = _time.monotonic() - start_mono
+                                telem["book_attempts"].append({
+                                    "time": best.slot_time.strftime("%H:%M"),
+                                    "result": str(e),
+                                    "elapsed": round(book_elapsed, 2),
+                                })
+                                _print(f"[watch] Booking failed: {e}")
+                    elif watch_polls % 20 == 0:
+                        watch_remaining = (watch_deadline - _time.monotonic()) / 60
+                        _print(f"[watch] Poll #{watch_polls}, {watch_remaining:.0f}min remaining, no slots")
+
+                except Exception as e:
+                    _print(f"[watch] Error: {e}")
+
+                await asyncio.sleep(watch_interval)
+
+            if booked_event.is_set() and booked_result:
+                result = booked_result[0]
+                result.target_id = target.id
+                return result
+
+            _print(f"[watch] Watch phase ended after {watch_polls} polls ({watch_mins}min)")
+            attempt += watch_polls  # include in total count
+
         # ── Build diagnostic summary ──
         total_time = round(_time.monotonic() - start_mono, 1)
         diag_parts = [f"Snipe completed: {attempt} attempts over {total_time}s."]
+        if watch_mins > 0:
+            diag_parts[0] = f"Snipe + watch completed: {attempt} attempts over {total_time}s (watch: {watch_mins}min)."
 
         if not telem["slots_ever_seen"]:
             diag_parts.append(
